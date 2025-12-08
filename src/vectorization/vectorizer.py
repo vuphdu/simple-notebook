@@ -64,10 +64,12 @@ class TextVectorizer:
         self.config.model_cache_dir.mkdir(parents=True, exist_ok=True)
         
         # Load model with cache
+        # trust_remote_code=True is required for Alibaba-NLP/gte-multilingual-base
         model = SentenceTransformer(
             self.config.model_name,
             cache_folder=str(self.config.model_cache_dir),
-            device=self.config.device
+            device=self.config.device,
+            trust_remote_code=True
         )
         
         # Set max sequence length
