@@ -13,12 +13,15 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import (
     settings, ensure_directories,
-    DOCUMENTS_DIR, VECTORDB_DIR, PROCESS_INPUT_DIR, PROCESS_OUTPUT_DIR
+    DOCUMENTS_DIR, INPUT_DOCS_DIR, EXTRACTED_IMAGES_DIR,
+    VECTORDB_DIR, FAISS_INDEX_DIR, PROCESS_INPUT_DIR, PROCESS_OUTPUT_DIR, MODELS_DIR
 )
 from src.chunking import DocumentChunker, chunk_documents
 from src.vectorization import TextVectorizer, VectorStore, get_vectorizer, get_vector_store
 from src.search import SearchEngine, get_search_engine
 from src.sequence_chart import SequenceChartProcessor, get_chart_processor
+from src.sequence_chart import SequenceChartProcessor, get_chart_processor
+from src.image_extraction import ImageExtractor, get_image_extractor
 
 
 def process_documents(
@@ -36,8 +39,13 @@ def process_documents(
     input_dir = input_dir or DOCUMENTS_DIR
     input_dir = Path(input_dir)
     
+    backend = settings.vectordb.backend
     print(f"Processing documents from: {input_dir}")
-    print(f"Vector DB location: {VECTORDB_DIR}")
+    print(f"Vector store backend: {backend}")
+    if backend == "faiss":
+        print(f"FAISS index location: {FAISS_INDEX_DIR}")
+    else:
+        print(f"ChromaDB location: {VECTORDB_DIR}")
     print("-" * 50)
     
     # Initialize components
@@ -96,6 +104,7 @@ def search_documents(
     Search through vectorized documents.
     """
     print(f"Searching for: '{query}'")
+    print(f"Using backend: {settings.vectordb.backend}")
     print("-" * 50)
     
     engine = get_search_engine()
@@ -122,6 +131,129 @@ def show_stats():
         print(f"  {key}: {value}")
 
 
+def extract_images(
+    input_path: Optional[Path] = None,
+    vectorize: bool = True
+):
+    """
+    Extract images from documents using PP-Structure.
+    
+    Args:
+        input_path: Path to file or directory.
+        vectorize: Whether to vectorize and store extracted images.
+    """
+    input_path = input_path or DOCUMENTS_DIR
+    input_path = Path(input_path)
+    
+    print(f"Extracting images from: {input_path}")
+    print("-" * 50)
+    
+    extractor = get_image_extractor()
+    
+    # Extract images
+    if input_path.is_file():
+        extracted = extractor.extract_from_file(input_path)
+    else:
+        extracted = extractor.extract_from_directory(input_path)
+    
+    print(f"\nExtracted {len(extracted)} images")
+    
+    # Vectorize and store
+    if vectorize and extracted:
+        print("\nVectorizing extracted images...")
+        vectorizer = get_vectorizer()
+        vector_store = get_vector_store()
+        
+        # Prepare data for vectorization
+        vectorization_data = extractor.get_vectorization_data(extracted)
+        
+        # Vectorize
+        for data in vectorization_data:
+            embedding = vectorizer.vectorize(data["content"])[0].tolist()
+            data["embedding"] = embedding
+        
+        # Store
+        vector_store.add_chunks(vectorization_data)
+        print(f"Stored {len(vectorization_data)} image descriptions in vector database")
+    
+    print("\n" + "=" * 50)
+    print("Image extraction complete!")
+    
+    # Show extracted images info
+    for img in extracted[:5]:  # Show first 5
+        print(f"  - {img.region_type}: {Path(img.image_path).name}")
+    if len(extracted) > 5:
+        print(f"  ... and {len(extracted) - 5} more")
+
+
+
+
+
+def clean_data(include_models: bool = False, skip_confirm: bool = False):
+    """
+    Clean extracted data.
+    
+    Args:
+        include_models: If True, also delete downloaded models.
+        skip_confirm: If True, skip confirmation prompt.
+    """
+    import shutil
+    
+    dirs_to_clean = [
+        (VECTORDB_DIR, "ChromaDB database"),
+        (FAISS_INDEX_DIR, "FAISS index"),
+        (EXTRACTED_IMAGES_DIR, "Extracted images"),
+        (PROCESS_INPUT_DIR, "Process input"),
+        (PROCESS_OUTPUT_DIR, "Process output"),
+    ]
+    
+    if include_models:
+        dirs_to_clean.append((MODELS_DIR, "Downloaded models"))
+    
+    # Show what will be deleted
+    print("The following directories will be cleaned:")
+    total_size = 0
+    for dir_path, name in dirs_to_clean:
+        if dir_path.exists():
+            # Calculate size
+            size = sum(f.stat().st_size for f in dir_path.rglob('*') if f.is_file())
+            total_size += size
+            size_mb = size / (1024 * 1024)
+            print(f"  {name}: {dir_path} ({size_mb:.2f} MB)")
+        else:
+            print(f"  {name}: {dir_path} (not exists)")
+    
+    print(f"\nTotal: {total_size / (1024 * 1024):.2f} MB")
+    
+    # Confirm
+    if not skip_confirm:
+        response = input("\nAre you sure you want to delete these? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Cancelled.")
+            return
+    
+    # Clean directories
+    print("\nCleaning...")
+    for dir_path, name in dirs_to_clean:
+        if dir_path.exists():
+            try:
+                # Remove all contents but keep the directory
+                for item in dir_path.iterdir():
+                    if item.is_file():
+                        item.unlink()
+                    elif item.is_dir():
+                        shutil.rmtree(item)
+                print(f"  ✓ Cleaned {name}")
+            except Exception as e:
+                print(f"  ✗ Error cleaning {name}: {e}")
+        else:
+            print(f"  - {name} not exists, skipped")
+    
+    # Recreate directories
+    ensure_directories()
+    print("\nClean completed!")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -138,8 +270,8 @@ def main():
     process_parser.add_argument(
         "--input", "-i",
         type=Path,
-        default=DOCUMENTS_DIR,
-        help=f"Input directory (default: {DOCUMENTS_DIR})"
+        default=INPUT_DOCS_DIR,
+        help=f"Input directory (default: {INPUT_DOCS_DIR})"
     )
     process_parser.add_argument(
         "--no-charts",
@@ -181,6 +313,39 @@ def main():
         help="Initialize directory structure"
     )
     
+    # Clean command
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Clean extracted data (vectordb, process input/output)"
+    )
+    clean_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Also clean downloaded models"
+    )
+    clean_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation prompt"
+    )
+    
+    # Extract images command
+    extract_parser = subparsers.add_parser(
+        "extract-images",
+        help="Extract images from documents using PP-Structure"
+    )
+    extract_parser.add_argument(
+        "--input", "-i",
+        type=Path,
+        default=INPUT_DOCS_DIR,
+        help=f"Input file or directory (default: {INPUT_DOCS_DIR})"
+    )
+    extract_parser.add_argument(
+        "--no-vectorize",
+        action="store_true",
+        help="Skip vectorization of extracted images"
+    )
+    
     args = parser.parse_args()
     
     # Ensure directories exist
@@ -208,6 +373,18 @@ def main():
         print(f"  Vector DB: {VECTORDB_DIR}")
         print(f"  Process Input: {PROCESS_INPUT_DIR}")
         print(f"  Process Output: {PROCESS_OUTPUT_DIR}")
+    
+    elif args.command == "clean":
+        clean_data(
+            include_models=args.all,
+            skip_confirm=args.yes
+        )
+    
+    elif args.command == "extract-images":
+        extract_images(
+            input_path=args.input,
+            vectorize=not args.no_vectorize
+        )
     
     else:
         parser.print_help()

@@ -10,22 +10,24 @@ faiss-cpu>=1.7.4
 # Document processing
 langchain>=0.1.0
 langchain-community>=0.0.10
-tiktoken>=0.5.0
-unstructured>=0.10.0
+langchain-text-splitters>=0.0.1
 
 # File handling
 python-docx>=0.8.11
 PyPDF2>=3.0.0
-markdown>=3.5.0
+PyMuPDF>=1.23.0
 
-# Sequence chart processing
-mermaid-py>=0.3.0
+# Image processing
 Pillow>=10.0.0
-cairosvg>=2.7.0
+
+# PaddleOCR for image extraction (PP-Structure)
+# Note: Install paddlepaddle first, then paddleocr
+# CPU: pip install paddlepaddle
+# GPU: pip install paddlepaddle-gpu
+paddleocr>=2.6.0
 
 # Utilities
 pydantic>=2.0.0
-python-dotenv>=1.0.0
 tqdm>=4.66.0
 numpy>=1.24.0
 

@@ -1,0 +1,517 @@
+"""
+Image Extraction Module using PaddleOCR PP-Structure
+
+This module provides functionality to extract image regions from documents
+using PaddleOCR's PP-Structure for layout analysis.
+"""
+from typing import Optional
+from pathlib import Path
+from dataclasses import dataclass, field
+import hashlib
+import os
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from config import settings, ensure_directories, EXTRACTED_IMAGES_DIR
+
+
+@dataclass
+class ExtractedImage:
+    """Represents an extracted image region from a document."""
+    image_id: str
+    image_path: str
+    source_file: str
+    page_number: int
+    bbox: tuple  # (x1, y1, x2, y2)
+    region_type: str  # "figure", "table", "chart", etc.
+    surrounding_text: str = ""
+    caption: str = ""
+    description: str = ""
+    
+    def to_dict(self) -> dict:
+        return {
+            "image_id": self.image_id,
+            "image_path": self.image_path,
+            "source_file": self.source_file,
+            "page_number": self.page_number,
+            "bbox": self.bbox,
+            "region_type": self.region_type,
+            "surrounding_text": self.surrounding_text,
+            "caption": self.caption,
+            "description": self.description,
+        }
+    
+    def get_vectorization_text(self) -> str:
+        """Generate text for vectorization."""
+        parts = []
+        if self.caption:
+            parts.append(f"Caption: {self.caption}")
+        if self.description:
+            parts.append(f"Description: {self.description}")
+        if self.surrounding_text:
+            parts.append(f"Context: {self.surrounding_text}")
+        parts.append(f"Type: {self.region_type}")
+        parts.append(f"Source: {Path(self.source_file).name}, Page {self.page_number}")
+        return "\n".join(parts)
+
+
+@dataclass  
+class ImageExtractionConfig:
+    """Configuration for image extraction."""
+    output_dir: Path = field(default_factory=lambda: EXTRACTED_IMAGES_DIR)
+    image_format: str = "png"
+    min_width: int = 50  # Minimum width to consider as valid image
+    min_height: int = 50  # Minimum height
+    extract_tables: bool = True
+    extract_figures: bool = True
+    context_chars: int = 500  # Number of characters to extract around image
+    use_gpu: bool = False
+
+
+class ImageExtractor:
+    """
+    Extracts image regions from documents using PaddleOCR PP-Structure.
+    
+    PP-Structure performs layout analysis to identify:
+    - Figures/Images
+    - Tables
+    - Charts
+    - Text blocks
+    """
+    
+    def __init__(self, config: Optional[ImageExtractionConfig] = None):
+        """
+        Initialize the ImageExtractor.
+        
+        Args:
+            config: Image extraction configuration.
+        """
+        self.config = config or ImageExtractionConfig()
+        self._structure_engine = None
+        ensure_directories()
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    @property
+    def structure_engine(self):
+        """Lazy loading of PP-Structure engine."""
+        if self._structure_engine is None:
+            self._structure_engine = self._init_structure_engine()
+        return self._structure_engine
+    
+    def _init_structure_engine(self):
+        """Initialize the PP-Structure engine."""
+        try:
+            from paddleocr import PPStructureV3
+            
+            print("Initializing PP-StructureV3 engine...")
+            engine = PPStructureV3(
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+            )
+            print("PP-StructureV3 engine initialized successfully")
+            return engine
+        except ImportError:
+            raise ImportError(
+                "PaddleOCR is required for image extraction. "
+                "Install with: pip install paddleocr[all]"
+            )
+    
+    def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract images from a PDF file.
+        
+        Uses PyMuPDF (fitz) as primary method, falls back to pdf2image if needed.
+        
+        Args:
+            pdf_path: Path to the PDF file.
+            
+        Returns:
+            List of ExtractedImage objects.
+        """
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        
+        print(f"Extracting images from: {pdf_path.name}")
+        
+        # Try PyMuPDF first (no external dependencies needed)
+        extracted_images = self._extract_pdf_with_pymupdf(pdf_path)
+        
+        if not extracted_images:
+            # Fallback to pdf2image if PyMuPDF didn't find images
+            print("  Trying alternative extraction method...")
+            extracted_images = self._extract_pdf_with_pdf2image(pdf_path)
+        
+        print(f"  Extracted {len(extracted_images)} images from {pdf_path.name}")
+        return extracted_images
+    
+    def _extract_pdf_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """Extract images using PyMuPDF (fitz) - primary method."""
+        try:
+            import fitz  # PyMuPDF
+            
+            doc = fitz.open(str(pdf_path))
+            extracted_images = []
+            
+            print(f"  Using PyMuPDF, {len(doc)} pages")
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                
+                # Get images directly from PDF
+                image_list = page.get_images(full=True)
+                
+                for img_index, img in enumerate(image_list):
+                    try:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+                        image_bytes = base_image["image"]
+                        image_ext = base_image["ext"]
+                        
+                        # Check image size
+                        width = base_image.get("width", 0)
+                        height = base_image.get("height", 0)
+                        
+                        if width < self.config.min_width or height < self.config.min_height:
+                            continue
+                        
+                        # Generate image ID
+                        image_id = hashlib.md5(image_bytes).hexdigest()[:8]
+                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_img{img_index}_{image_id}.{image_ext}"
+                        image_path = self.config.output_dir / image_filename
+                        
+                        # Save image
+                        with open(image_path, "wb") as f:
+                            f.write(image_bytes)
+                        
+                        # Get surrounding text
+                        text = page.get_text()
+                        
+                        extracted_images.append(ExtractedImage(
+                            image_id=image_id,
+                            image_path=str(image_path),
+                            source_file=str(pdf_path),
+                            page_number=page_num + 1,
+                            bbox=(0, 0, width, height),
+                            region_type="figure",
+                            surrounding_text=text[:self.config.context_chars],
+                            caption="",
+                            description=f"Image from {pdf_path.name}, page {page_num + 1}"
+                        ))
+                        
+                        print(f"    Found image on page {page_num + 1}: {width}x{height}")
+                    except Exception as e:
+                        print(f"    Error extracting image {img_index} on page {page_num + 1}: {e}")
+            
+            doc.close()
+            return extracted_images
+            
+        except ImportError:
+            print("  PyMuPDF not available")
+            return []
+        except Exception as e:
+            print(f"  PyMuPDF error: {e}")
+            return []
+    
+    def _extract_pdf_with_pdf2image(self, pdf_path: Path) -> list[ExtractedImage]:
+        """Extract images using pdf2image and PP-Structure."""
+        try:
+            from pdf2image import convert_from_path
+            
+            extracted_images = []
+            pages = convert_from_path(str(pdf_path), dpi=150)
+            
+            for page_num, page_image in enumerate(pages, start=1):
+                print(f"  Processing page {page_num}/{len(pages)}...")
+                
+                # Save page as temporary image
+                temp_path = self.config.output_dir / f"_temp_page_{page_num}.png"
+                page_image.save(str(temp_path))
+                
+                # Extract images from this page
+                page_images = self._extract_from_image(
+                    temp_path,
+                    source_file=str(pdf_path),
+                    page_number=page_num
+                )
+                extracted_images.extend(page_images)
+                
+                # Clean up temp file
+                temp_path.unlink(missing_ok=True)
+            
+            return extracted_images
+                
+        except ImportError:
+            print("  pdf2image not available. Install poppler and pdf2image.")
+            return []
+        except Exception as e:
+            print(f"  pdf2image error: {e}")
+            return []
+    
+    def _extract_from_image(
+        self,
+        image_path: Path,
+        source_file: str,
+        page_number: int = 1
+    ) -> list[ExtractedImage]:
+        """
+        Extract image regions from a single image using PP-Structure.
+        
+        Args:
+            image_path: Path to the image.
+            source_file: Original source file path.
+            page_number: Page number in the source document.
+            
+        Returns:
+            List of ExtractedImage objects.
+        """
+        extracted_images = []
+        
+        try:
+            from PIL import Image
+            import numpy as np
+            
+            # Run PP-Structure analysis
+            results = self.structure_engine.predict(input=str(image_path))
+            
+            # Load original image for cropping
+            original_image = Image.open(image_path)
+            
+            # Process results
+            for result in results:
+                # Get layout parsing result
+                if hasattr(result, 'layout_parsing_result'):
+                    layout_result = result.layout_parsing_result
+                elif isinstance(result, dict) and 'layout_parsing_result' in result:
+                    layout_result = result['layout_parsing_result']
+                else:
+                    continue
+                
+                # Extract text content for context
+                all_text = self._extract_text_from_result(result)
+                
+                # Process each detected region
+                if isinstance(layout_result, dict):
+                    boxes = layout_result.get('boxes', [])
+                    for box_idx, box in enumerate(boxes):
+                        region_type = box.get('type', 'unknown')
+                        bbox = box.get('bbox', box.get('coordinate', []))
+                        
+                        # Filter by region type
+                        if region_type in ['figure', 'image', 'chart', 'picture']:
+                            if not self.config.extract_figures:
+                                continue
+                        elif region_type == 'table':
+                            if not self.config.extract_tables:
+                                continue
+                        else:
+                            continue  # Skip text regions
+                        
+                        if len(bbox) >= 4:
+                            # Crop and save the image region
+                            cropped = self._crop_region(original_image, bbox)
+                            
+                            if cropped and self._is_valid_size(cropped):
+                                image_id = hashlib.md5(
+                                    f"{source_file}_{page_number}_{box_idx}".encode()
+                                ).hexdigest()[:8]
+                                
+                                image_filename = f"{Path(source_file).stem}_p{page_number}_{region_type}_{image_id}.{self.config.image_format}"
+                                save_path = self.config.output_dir / image_filename
+                                cropped.save(str(save_path))
+                                
+                                # Get nearby text as context
+                                nearby_text = self._get_nearby_text(box, layout_result)
+                                
+                                extracted_images.append(ExtractedImage(
+                                    image_id=image_id,
+                                    image_path=str(save_path),
+                                    source_file=source_file,
+                                    page_number=page_number,
+                                    bbox=tuple(bbox[:4]),
+                                    region_type=region_type,
+                                    surrounding_text=nearby_text or all_text[:self.config.context_chars],
+                                    caption=box.get('caption', ''),
+                                    description=f"{region_type} from page {page_number}"
+                                ))
+            
+        except Exception as e:
+            print(f"Error extracting from image: {e}")
+        
+        return extracted_images
+    
+    def _crop_region(self, image, bbox) -> Optional["Image.Image"]:
+        """Crop a region from an image."""
+        try:
+            from PIL import Image
+            
+            # Handle different bbox formats
+            if len(bbox) == 4:
+                x1, y1, x2, y2 = bbox
+            elif len(bbox) == 8:  # Polygon format
+                x1 = min(bbox[0], bbox[2], bbox[4], bbox[6])
+                y1 = min(bbox[1], bbox[3], bbox[5], bbox[7])
+                x2 = max(bbox[0], bbox[2], bbox[4], bbox[6])
+                y2 = max(bbox[1], bbox[3], bbox[5], bbox[7])
+            else:
+                return None
+            
+            # Ensure valid coordinates
+            x1, y1 = max(0, int(x1)), max(0, int(y1))
+            x2, y2 = min(image.width, int(x2)), min(image.height, int(y2))
+            
+            if x2 > x1 and y2 > y1:
+                return image.crop((x1, y1, x2, y2))
+            return None
+            
+        except Exception:
+            return None
+    
+    def _is_valid_size(self, image) -> bool:
+        """Check if image meets minimum size requirements."""
+        return image.width >= self.config.min_width and image.height >= self.config.min_height
+    
+    def _extract_text_from_result(self, result) -> str:
+        """Extract all text content from PP-Structure result."""
+        texts = []
+        
+        try:
+            if hasattr(result, 'layout_parsing_result'):
+                layout = result.layout_parsing_result
+            elif isinstance(result, dict):
+                layout = result.get('layout_parsing_result', {})
+            else:
+                return ""
+            
+            if isinstance(layout, dict):
+                boxes = layout.get('boxes', [])
+                for box in boxes:
+                    if box.get('type') in ['text', 'title', 'paragraph']:
+                        texts.append(box.get('text', ''))
+        except Exception:
+            pass
+        
+        return " ".join(texts)
+    
+    def _get_nearby_text(self, target_box: dict, layout_result: dict) -> str:
+        """Get text from regions near the target box."""
+        if not isinstance(layout_result, dict):
+            return ""
+        
+        target_bbox = target_box.get('bbox', target_box.get('coordinate', []))
+        if len(target_bbox) < 4:
+            return ""
+        
+        target_center_y = (target_bbox[1] + target_bbox[3]) / 2
+        
+        nearby_texts = []
+        boxes = layout_result.get('boxes', [])
+        
+        for box in boxes:
+            if box.get('type') in ['text', 'title', 'paragraph', 'caption']:
+                box_bbox = box.get('bbox', box.get('coordinate', []))
+                if len(box_bbox) >= 4:
+                    box_center_y = (box_bbox[1] + box_bbox[3]) / 2
+                    
+                    # Check if text is near (within 100 pixels vertically)
+                    if abs(box_center_y - target_center_y) < 200:
+                        text = box.get('text', '')
+                        if text:
+                            nearby_texts.append(text)
+        
+        return " ".join(nearby_texts[:3])  # Limit to 3 nearby text blocks
+    
+    def extract_from_file(self, file_path: Path) -> list[ExtractedImage]:
+        """
+        Extract images from a file (PDF or image).
+        
+        Args:
+            file_path: Path to the file.
+            
+        Returns:
+            List of ExtractedImage objects.
+        """
+        file_path = Path(file_path)
+        suffix = file_path.suffix.lower()
+        
+        if suffix == '.pdf':
+            return self.extract_from_pdf(file_path)
+        elif suffix in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
+            return self._extract_from_image(
+                file_path,
+                source_file=str(file_path),
+                page_number=1
+            )
+        else:
+            print(f"Unsupported file type: {suffix}")
+            return []
+    
+    def extract_from_directory(
+        self,
+        directory: Path,
+        recursive: bool = True
+    ) -> list[ExtractedImage]:
+        """
+        Extract images from all documents in a directory.
+        
+        Args:
+            directory: Path to the directory.
+            recursive: Whether to process subdirectories.
+            
+        Returns:
+            List of all ExtractedImage objects.
+        """
+        directory = Path(directory)
+        all_images = []
+        
+        pattern = '**/*' if recursive else '*'
+        extensions = ['.pdf', '.png', '.jpg', '.jpeg']
+        
+        for file_path in directory.glob(pattern):
+            if file_path.is_file() and file_path.suffix.lower() in extensions:
+                try:
+                    images = self.extract_from_file(file_path)
+                    all_images.extend(images)
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+        
+        return all_images
+    
+    def get_vectorization_data(self, images: list[ExtractedImage]) -> list[dict]:
+        """
+        Prepare extracted images for vectorization.
+        
+        Args:
+            images: List of ExtractedImage objects.
+            
+        Returns:
+            List of dicts ready for vectorization.
+        """
+        data = []
+        for img in images:
+            data.append({
+                "chunk_id": f"img_{img.image_id}",
+                "content": img.get_vectorization_text(),
+                "metadata": {
+                    "type": "extracted_image",
+                    "region_type": img.region_type,
+                    "image_path": img.image_path,
+                    "source_file": img.source_file,
+                    "page_number": img.page_number,
+                    "bbox": str(img.bbox),
+                },
+                "source_file": img.source_file
+            })
+        return data
+
+
+# Global extractor instance
+_extractor: Optional[ImageExtractor] = None
+
+
+def get_image_extractor() -> ImageExtractor:
+    """Get or create the global image extractor instance."""
+    global _extractor
+    if _extractor is None:
+        _extractor = ImageExtractor()
+    return _extractor

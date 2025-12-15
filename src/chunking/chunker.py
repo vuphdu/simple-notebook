@@ -6,7 +6,6 @@ for efficient vectorization and retrieval.
 """
 from typing import Optional
 from pathlib import Path
-import re
 
 try:
     from langchain_text_splitters import RecursiveCharacterTextSplitter

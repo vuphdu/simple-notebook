@@ -10,7 +10,10 @@ from typing import Optional
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
 DOCUMENTS_DIR = DATA_DIR / "documents"
+INPUT_DOCS_DIR = DOCUMENTS_DIR / "input-doc"  # Input documents location
+EXTRACTED_IMAGES_DIR = DOCUMENTS_DIR / "extracted_images"  # Extracted images output
 VECTORDB_DIR = DATA_DIR / "vectordb"
+FAISS_INDEX_DIR = DATA_DIR / "faiss_index"
 MODELS_DIR = BASE_DIR / "models"
 PROCESS_DIR = BASE_DIR / "process"
 PROCESS_INPUT_DIR = PROCESS_DIR / "input"
@@ -36,9 +39,13 @@ class ChunkingConfig(BaseModel):
 
 class VectorDBConfig(BaseModel):
     """Configuration for vector database."""
+    backend: str = "faiss"  # "chromadb" or "faiss"
     collection_name: str = "documents"
     persist_directory: Path = VECTORDB_DIR
+    faiss_index_dir: Path = FAISS_INDEX_DIR
     distance_metric: str = "cosine"  # cosine, l2, ip
+    # FAISS specific options
+    faiss_index_type: str = "Flat"  # Flat, IVF, HNSW
 
 
 class SearchConfig(BaseModel):
@@ -72,7 +79,9 @@ def ensure_directories():
     """Create all required directories if they don't exist."""
     directories = [
         DOCUMENTS_DIR,
+        INPUT_DOCS_DIR,
         VECTORDB_DIR,
+        FAISS_INDEX_DIR,
         MODELS_DIR,
         PROCESS_INPUT_DIR,
         PROCESS_OUTPUT_DIR,

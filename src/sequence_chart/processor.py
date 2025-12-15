@@ -4,11 +4,10 @@ Sequence Chart Processing Module
 This module provides functionality to parse, render, and vectorize
 sequence diagrams (e.g., Mermaid sequence charts).
 """
-from typing import Optional, Union
+from typing import Optional
 from pathlib import Path
 from dataclasses import dataclass, field
 import re
-import json
 import subprocess
 import tempfile
 import hashlib

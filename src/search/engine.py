@@ -3,7 +3,7 @@ Search Module
 
 This module provides functionality for semantic search through vectorized documents.
 """
-from typing import Optional, Union
+from typing import Optional
 from pathlib import Path
 from datetime import datetime
 import json

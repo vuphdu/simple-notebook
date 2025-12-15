@@ -29,13 +29,26 @@ Thumbs.db
 # Project specific
 models/*
 !models/.gitkeep
+
+# Data directories
 data/vectordb/*
 !data/vectordb/.gitkeep
+data/faiss_index/*
+!data/faiss_index/.gitkeep
+
+# Documents and generated content
+data/documents/input-doc/*
+!data/documents/input-doc/.gitkeep
+data/documents/extracted_images/*
+!data/documents/extracted_images/.gitkeep
+data/documents/charts/*
+!data/documents/charts/.gitkeep
+
+# Process directories
 process/input/*
 !process/input/.gitkeep
 process/output/*
 !process/output/.gitkeep
-data/documents/charts/
 
 # Testing
 .pytest_cache/
