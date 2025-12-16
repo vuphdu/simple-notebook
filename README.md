@@ -9,7 +9,7 @@ A simple Retrieval-Augmented Generation (RAG) system with chunking, vectorizatio
 - **Sequence Chart Processing**: Extract and process sequence diagrams with image export and description vectorization
 - **Semantic Search**: Search through vectorized documents with similarity matching
 - **Dual Backend Support**: Choose between FAISS (fast) or ChromaDB (full-featured)
-- **Image Extraction**: Extract images/figures from documents using PaddleOCR PP-Structure
+- **Image Extraction**: Extract images and vector drawings from documents using PyMuPDF (fitz)
 
 ## Directory Structure
 
@@ -30,7 +30,7 @@ simple-notebook/
 │   ├── vectorization/          # Text vectorization module
 │   ├── search/                 # Search and retrieval module
 │   ├── sequence_chart/         # Sequence chart processing
-│   └── image_extraction/       # Image extraction with PP-Structure
+│   └── image_extraction/       # Image extraction with PyMuPDF
 ├── config/                     # Configuration files
 └── tests/                      # Unit tests
 ```
@@ -40,11 +40,6 @@ simple-notebook/
 ```bash
 # Install base requirements
 pip install -r requirements.txt
-
-# For PaddleOCR image extraction, also install:
-pip install paddlepaddle  # CPU version
-# OR for GPU:
-# pip install paddlepaddle-gpu
 ```
 
 ## Quick Start
@@ -107,19 +102,19 @@ This system uses **Alibaba-NLP/gte-multilingual-base** for text embedding:
 - First run downloads the model to `/models/`
 - Subsequent runs use the cached model
 
-## Image Extraction with PP-Structure
+## Image Extraction
 
-The system uses PaddleOCR's PP-Structure for:
+The system uses **PyMuPDF (fitz)** for robust image extraction:
 
-- **Layout Analysis**: Detect image/figure regions in documents
-- **Region Cropping**: Extract and save image regions
-- **Context Extraction**: Capture surrounding text as descriptions
-- **Vectorization**: Store image descriptions for semantic search
+- **Bitmap Extraction**: Extracts embedded images (PNG, JPEG, etc.).
+- **Vector Drawing Extraction**: Detects and renders vector graphics (diagrams, charts) drawn directly on PDF pages.
+- **Smart Filtering**: Automatically filters out invalid images (solid black/white blocks) using brightness and variance checks.
+- **Performance**: Optimized with direct buffer access and efficient clustering algorithms.
+- **Vectorization**: Stores image descriptions (surrounding text) for semantic search.
 
 Supported document types:
 
-- PDF files (using PyMuPDF or pdf2image)
-- Image files (PNG, JPG, JPEG, BMP, TIFF)
+- PDF files
 
 ## Vector Store Backends
 
@@ -158,7 +153,7 @@ backend: str = "chromadb"  # Persistent, with metadata filtering
 | Vector Store     | Lưu trữ với **FAISS** (default) hoặc ChromaDB                 |
 | Search           | Tìm kiếm semantic với cosine similarity                       |
 | Sequence Chart   | Parse Mermaid diagrams → export image + vectorize description |
-| Image Extraction | Trích xuất hình ảnh từ tài liệu với PP-Structure              |
+| Image Extraction | Trích xuất hình ảnh & vector drawings từ tài liệu với PyMuPDF |
 
 ## License
 
