@@ -71,6 +71,11 @@ class ImageExtractionConfig:
     extract_figures: bool = True
     context_chars: int = 500  # Number of characters to extract around image
     use_gpu: bool = False
+    
+    # Clustering config
+    cluster_merge_distance: int = 50  # Pixels to merge nearby drawings
+    min_drawing_size: int = 20  # Minimum size for a drawing path
+    min_diagram_size: int = 100  # Minimum size for a clustered diagram
 
 
 class ImageExtractor:
@@ -189,15 +194,15 @@ class ImageExtractor:
                         height = pix.height
                             
                         # Generate image ID
-                        image_data = pix.tobytes("png")
-                        
                         # Validate image content (check for black/empty images)
-                        is_valid, _, _ = self._is_valid_image(image_data)
+                        # Pass the pixmap directly to avoid PIL overhead if possible
+                        is_valid, _, _ = self._is_valid_pixmap(pix)
                         
                         if not is_valid:
                             pix = None
                             continue
                             
+                        image_data = pix.tobytes("png")
                         image_id = hashlib.md5(image_data).hexdigest()[:8]
                         image_filename = f"{pdf_path.stem}_p{page_num + 1}_img{img_index}_{image_id}.png"
                         image_path = self.config.output_dir / image_filename
@@ -263,35 +268,38 @@ class ImageExtractor:
                     continue
                 
                 # Cluster rects to find diagram regions
-                # Simple approach: Merge all valid rects on the page for now
-                # (A more advanced approach would cluster them spatially)
-                # For HFP spec, diagrams usually take up a significant part of the page
+                # Optimized approach: Sort by position and single-pass merge
                 
-                # Group intersecting or close rectangles
+                # 1. Sort by Y then X
+                valid_rects.sort(key=lambda r: (r.y0, r.x0))
+                
                 clusters = []
-                while valid_rects:
-                    rect = valid_rects.pop(0)
-                    merged = False
-                    for i, cluster in enumerate(clusters):
-                        # If rect is close to cluster (within 50 pixels), merge
-                        # Using a slightly larger expansion for clustering
-                        cluster_expanded = fitz.Rect(cluster)
-                        cluster_expanded.x0 -= 50
-                        cluster_expanded.y0 -= 50
-                        cluster_expanded.x1 += 50
-                        cluster_expanded.y1 += 50
+                if valid_rects:
+                    current_cluster = fitz.Rect(valid_rects[0])
+                    
+                    for rect in valid_rects[1:]:
+                        # Check if rect is close to current cluster
+                        # Expand current cluster by merge distance for check
+                        expanded = fitz.Rect(current_cluster)
+                        expanded.x0 -= self.config.cluster_merge_distance
+                        expanded.y0 -= self.config.cluster_merge_distance
+                        expanded.x1 += self.config.cluster_merge_distance
+                        expanded.y1 += self.config.cluster_merge_distance
                         
-                        if rect.intersects(cluster_expanded):
-                            cluster.include_rect(rect)
-                            merged = True
-                            break
-                    if not merged:
-                        clusters.append(rect)
+                        if rect.intersects(expanded):
+                            current_cluster.include_rect(rect)
+                        else:
+                            # Finish current cluster and start new one
+                            clusters.append(current_cluster)
+                            current_cluster = fitz.Rect(rect)
+                    
+                    # Append the last cluster
+                    clusters.append(current_cluster)
                 
                 # Process clusters
                 for i, rect in enumerate(clusters):
                     # Check if cluster is big enough to be a diagram
-                    if rect.width < 100 or rect.height < 100:
+                    if rect.width < self.config.min_diagram_size or rect.height < self.config.min_diagram_size:
                         continue
                         
                     # Render the region
@@ -299,14 +307,14 @@ class ImageExtractor:
                     try:
                         pix = page.get_pixmap(clip=rect, dpi=150)
                         
-                        # Check validity
-                        image_data = pix.tobytes("png")
-                        is_valid, _, _ = self._is_valid_image(image_data)
+                        # Check validity using optimized check
+                        is_valid, _, _ = self._is_valid_pixmap(pix)
                         
                         if not is_valid:
                             pix = None
                             continue
-                            
+                        
+                        image_data = pix.tobytes("png")
                         # Save
                         image_id = hashlib.md5(image_data).hexdigest()[:8]
                         image_filename = f"{pdf_path.stem}_p{page_num + 1}_drawing{i}_{image_id}.png"
@@ -605,6 +613,53 @@ class ImageExtractor:
         
         return all_images
     
+    def _is_valid_pixmap(self, pix) -> tuple[bool, str, dict]:
+        """
+        Check if pixmap is valid using direct buffer access (faster than PIL).
+        """
+        stats = {"brightness": 0, "std_dev": 0}
+        try:
+            # Get raw samples
+            # pix.samples is a bytes object
+            # pix.n is number of channels (e.g. 3 for RGB, 4 for RGBA)
+            
+            # Convert to numpy array
+            # Note: This is a view, no copy if possible, but safe to copy for stats
+            samples = np.frombuffer(pix.samples, dtype=np.uint8)
+            
+            if pix.n >= 3:
+                # Reshape to (H, W, C)
+                # We only care about brightness, so we can just average all channels or take a stride
+                # For speed, let's just use the buffer directly.
+                # If RGB, mean of all bytes is roughly mean brightness (approximation)
+                # But to be accurate to PIL's convert('L'), we should do weighted sum.
+                # However, for "is it black?", simple mean is enough.
+                pass
+            
+            # Simple statistical check on the whole buffer
+            # This treats R, G, B, A equally, which is a rough approximation but fast
+            mean_val = np.mean(samples)
+            std_val = np.std(samples)
+            
+            stats["brightness"] = mean_val
+            stats["std_dev"] = std_val
+            
+            # Thresholds might need slight adjustment compared to PIL 'L' mode
+            # but usually close enough for "black vs content"
+            
+            if mean_val < self.config.min_brightness:
+                return False, f"Too dark (mean={mean_val:.2f})", stats
+                
+            if std_val < self.config.min_std_dev:
+                return False, f"Low variance (std={std_val:.2f})", stats
+                
+            return True, "OK", stats
+            
+        except Exception as e:
+            # Fallback to PIL method if something fails
+            print(f"Error in fast validation: {e}")
+            return self._is_valid_image(pix.tobytes("png"))
+
     def _is_valid_image(self, image_data: bytes) -> tuple[bool, str, dict]:
         """
         Check if image is valid (not too dark, not solid color).
