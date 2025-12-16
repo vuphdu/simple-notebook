@@ -110,6 +110,24 @@ class VectorStore:
             metadatas=metadatas
         )
         print(f"Added {len(ids)} vectors to collection '{self.config.collection_name}'")
+
+    def update(
+        self,
+        ids: list[str],
+        embeddings: Optional[list[list[float]]] = None,
+        documents: Optional[list[str]] = None,
+        metadatas: Optional[list[dict]] = None
+    ):
+        """
+        Update vectors in the store.
+        """
+        self.collection.update(
+            ids=ids,
+            embeddings=embeddings,
+            documents=documents,
+            metadatas=metadatas
+        )
+        print(f"Updated {len(ids)} vectors in collection '{self.config.collection_name}'")
     
     def add_chunks(self, vectorized_chunks: list[dict]):
         """

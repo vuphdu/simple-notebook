@@ -56,17 +56,45 @@ def process_documents(
     
     all_vectorized = []
     
-    # 1. Process regular documents
-    print("\n[1/3] Chunking documents...")
-    chunks = chunker.chunk_directory(input_dir)
-    print(f"Total chunks: {len(chunks)}")
+    # 1. Process regular documents (Text files including PDF)
+    print("\n[1/3] Chunking documents (txt, md, docx, pdf)...")
+    # Include PDF in text chunking as requested
+    chunks = chunker.chunk_directory(
+        input_dir, 
+        extensions=['.txt', '.md', '.docx', '.markdown', '.pdf']
+    )
+    print(f"Total text chunks: {len(chunks)}")
     
     if chunks:
         print("\n[2/3] Vectorizing text chunks...")
         vectorized_chunks = vectorizer.vectorize_chunks(chunks)
         all_vectorized.extend(vectorized_chunks)
     
-    # 2. Process sequence charts
+    # 2. Process PDFs as Images (Full Page Extraction)
+    print("\n[2a] Processing PDFs (Page Extraction)...")
+    # We use the image extractor for PDFs
+    extractor = get_image_extractor()
+    # Find all PDFs
+    pdf_files = list(input_dir.glob("**/*.pdf"))
+    print(f"Found {len(pdf_files)} PDF files")
+    
+    for pdf_file in pdf_files:
+        try:
+            extracted_pages = extractor.extract_from_file(pdf_file)
+            if extracted_pages:
+                page_data = extractor.get_vectorization_data(extracted_pages)
+                
+                # Vectorize page descriptions
+                for data in page_data:
+                    embedding = vectorizer.vectorize(data["content"])[0].tolist()
+                    data["embedding"] = embedding
+                
+                all_vectorized.extend(page_data)
+                print(f"  Processed {len(extracted_pages)} pages from {pdf_file.name}")
+        except Exception as e:
+            print(f"  Error processing PDF {pdf_file}: {e}")
+
+    # 3. Process sequence charts (if any MD files)
     if include_charts:
         print("\n[2b] Processing sequence charts...")
         for md_file in input_dir.glob("**/*.md"):
@@ -85,7 +113,7 @@ def process_documents(
             except Exception as e:
                 print(f"  Error processing {md_file}: {e}")
     
-    # 3. Store in vector database
+    # 4. Store in vector database
     if all_vectorized:
         print(f"\n[3/3] Storing {len(all_vectorized)} items in vector database...")
         vector_store.add_chunks(all_vectorized)
@@ -136,7 +164,7 @@ def extract_images(
     vectorize: bool = True
 ):
     """
-    Extract images from documents using PP-Structure.
+    Extract images from documents using PyMuPDF.
     
     Args:
         input_path: Path to file or directory.
@@ -184,6 +212,77 @@ def extract_images(
         print(f"  - {img.region_type}: {Path(img.image_path).name}")
     if len(extracted) > 5:
         print(f"  ... and {len(extracted) - 5} more")
+
+
+def update_context(
+    query: str,
+    new_context: str,
+    confirm: bool = True
+):
+    """
+    Update context for a document found by query.
+    
+    Args:
+        query: Search query to find the document.
+        new_context: New context text to append.
+        confirm: Whether to ask for confirmation.
+    """
+    print(f"Searching for document matching: '{query}'")
+    
+    # 1. Search for the item
+    # We use the search engine directly to get raw results
+    engine = get_search_engine()
+    results = engine.search(query, top_k=1)
+    
+    if not results:
+        print("No documents found matching the query.")
+        return
+
+    result = results[0]
+    doc_id = result.chunk_id
+    current_content = result.document
+    current_metadata = result.metadata
+    similarity = result.similarity
+    
+    print("-" * 50)
+    print(f"Found item (ID: {doc_id})")
+    print(f"Match score: {similarity:.4f}")
+    print(f"Source: {current_metadata.get('source_file', 'Unknown')}")
+    print(f"Current Content Preview:\n{current_content[:200]}...")
+    print("-" * 50)
+    
+    if confirm:
+        response = input("\nIs this the correct document to update? [y/N]: ")
+        if response.lower() not in ['y', 'yes']:
+            print("Cancelled.")
+            return
+
+    # 2. Update content
+    # We append the new context to the existing content
+    updated_content = f"{current_content}\n\n[User Note]: {new_context}"
+    
+    print("\nRe-vectorizing content...")
+    
+    # 3. Re-vectorize
+    vectorizer = get_vectorizer()
+    new_embedding = vectorizer.vectorize(updated_content)[0].tolist()
+    
+    # 4. Update Store
+    vector_store = get_vector_store()
+    
+    # Update metadata to track modification
+    updated_metadata = current_metadata.copy()
+    updated_metadata['user_modified'] = True
+    
+    vector_store.update(
+        ids=[doc_id],
+        embeddings=[new_embedding],
+        documents=[updated_content],
+        metadatas=[updated_metadata]
+    )
+    
+    print(f"\nSuccessfully added context to document {doc_id}!")
+    print("New content is now searchable.")
 
 
 
@@ -332,7 +431,7 @@ def main():
     # Extract images command
     extract_parser = subparsers.add_parser(
         "extract-images",
-        help="Extract images from documents using PP-Structure"
+        help="Extract images from documents using PyMuPDF"
     )
     extract_parser.add_argument(
         "--input", "-i",
@@ -344,6 +443,27 @@ def main():
         "--no-vectorize",
         action="store_true",
         help="Skip vectorization of extracted images"
+    )
+
+    # Update command
+    update_parser = subparsers.add_parser(
+        "update",
+        help="Add context to a document/image"
+    )
+    update_parser.add_argument(
+        "query",
+        type=str,
+        help="Query to find the document (e.g. 'page 100')"
+    )
+    update_parser.add_argument(
+        "context",
+        type=str,
+        help="New context to add"
+    )
+    update_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        help="Skip confirmation"
     )
     
     args = parser.parse_args()
@@ -384,6 +504,13 @@ def main():
         extract_images(
             input_path=args.input,
             vectorize=not args.no_vectorize
+        )
+
+    elif args.command == "update":
+        update_context(
+            query=args.query,
+            new_context=args.context,
+            confirm=not args.yes
         )
     
     else:

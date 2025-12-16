@@ -1,9 +1,245 @@
 """
-Image Extraction Module using PaddleOCR PP-Structure
+Image Extraction Module using PyMuPDF
 
-This module provides functionality to extract image regions from documents
-using PaddleOCR's PP-Structure for layout analysis.
+This module provides functionality to extract full pages as images from documents
+if they contain visual elements (images or vector drawings).
 """
+from typing import Optional
+from pathlib import Path
+from dataclasses import dataclass, field
+import hashlib
+import io
+import numpy as np
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from config import settings, ensure_directories, EXTRACTED_IMAGES_DIR
+from PIL import Image
+
+
+@dataclass
+class ExtractedImage:
+    """Represents an extracted image region from a document."""
+    image_id: str
+    image_path: str
+    source_file: str
+    page_number: int
+    bbox: tuple  # (x1, y1, x2, y2)
+    region_type: str  # "full_page_image"
+    surrounding_text: str = ""
+    caption: str = ""
+    description: str = ""
+    
+    def to_dict(self) -> dict:
+        return {
+            "image_id": self.image_id,
+            "image_path": self.image_path,
+            "source_file": self.source_file,
+            "page_number": self.page_number,
+            "bbox": self.bbox,
+            "region_type": self.region_type,
+            "surrounding_text": self.surrounding_text,
+            "caption": self.caption,
+            "description": self.description,
+        }
+    
+    def get_vectorization_text(self) -> str:
+        """Generate text for vectorization."""
+        parts = []
+        if self.caption:
+            parts.append(f"Caption: {self.caption}")
+        if self.description:
+            parts.append(f"Description: {self.description}")
+        if self.surrounding_text:
+            parts.append(f"Context: {self.surrounding_text}")
+        parts.append(f"Type: {self.region_type}")
+        parts.append(f"Source: {Path(self.source_file).name}, Page {self.page_number}")
+        return "\n".join(parts)
+
+
+@dataclass  
+class ImageExtractionConfig:
+    """Configuration for image extraction."""
+    output_dir: Path = field(default_factory=lambda: EXTRACTED_IMAGES_DIR)
+    image_format: str = "png"
+    min_width: int = 50  # Minimum width to consider as valid image
+    min_height: int = 50  # Minimum height
+    
+    # Config for full page extraction
+    extract_full_page: bool = True  # Always True in this optimized version
+
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
+class ImageExtractor:
+    """
+    Extracts full pages as images from documents using PyMuPDF.
+    """
+    
+    def __init__(self, config: Optional[ImageExtractionConfig] = None):
+        """
+        Initialize the ImageExtractor.
+        
+        Args:
+            config: Image extraction configuration.
+        """
+        self.config = config or ImageExtractionConfig()
+        ensure_directories()
+        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        if fitz is None:
+            print("Warning: PyMuPDF (fitz) is not installed. Image extraction will not work.")
+            print("Install with: pip install pymupdf")
+    
+    def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract full pages as images if they contain any images or drawings.
+        
+        Args:
+            pdf_path: Path to the PDF file.
+            
+        Returns:
+            List of ExtractedImage objects (one per page with images).
+        """
+        if fitz is None:
+            print("  PyMuPDF not available. Install with: pip install pymupdf")
+            return []
+
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+            
+        try:
+            doc = fitz.open(str(pdf_path))
+            extracted_pages = []
+            
+            print(f"Scanning {len(doc)} pages in {pdf_path.name}...")
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                
+                try:
+                    # Render full page
+                    # Use dpi=150 or 200 for good quality
+                    pix = page.get_pixmap(dpi=150)
+                    
+                    image_data = pix.tobytes("png")
+                    image_id = hashlib.md5(image_data).hexdigest()[:8]
+                    image_filename = f"{pdf_path.stem}_page_{page_num + 1}_{image_id}.png"
+                    image_path = self.config.output_dir / image_filename
+                    
+                    # Save image
+                    pix.save(str(image_path))
+                    pix = None
+                    
+                    # Get full page text
+                    text = page.get_text()
+                    
+                    extracted_pages.append(ExtractedImage(
+                        image_id=image_id,
+                        image_path=str(image_path),
+                        source_file=str(pdf_path),
+                        page_number=page_num + 1,
+                        bbox=(0, 0, page.rect.width, page.rect.height),
+                        region_type="full_page_image",
+                        surrounding_text=text,  # Full page text
+                        caption="",
+                        description=f"Full page image from {pdf_path.name}, page {page_num + 1}"
+                    ))
+                    
+                    # print(f"    Captured Page {page_num + 1}")
+                    
+                except Exception as e:
+                    print(f"    Error capturing page {page_num + 1}: {e}")
+            
+            doc.close()
+            print(f"  Converted {len(extracted_pages)} pages to images from {pdf_path.name}")
+            return extracted_pages
+            
+        except Exception as e:
+            print(f"  Error with PyMuPDF: {e}")
+            return []
+    
+    def extract_from_file(self, file_path: Path) -> list[ExtractedImage]:
+        """
+        Extract images from a file.
+        
+        Args:
+            file_path: Path to the file.
+            
+        Returns:
+            List of ExtractedImage objects.
+        """
+        file_path = Path(file_path)
+        suffix = file_path.suffix.lower()
+        
+        if suffix == '.pdf':
+            return self.extract_from_pdf(file_path)
+        else:
+            # For now, we only support PDF full page extraction
+            # If user wants to ingest raw images, we could add that later
+            print(f"Skipping non-PDF file: {file_path.name}")
+            return []
+    
+    def extract_from_directory(
+        self,
+        directory: Path,
+        recursive: bool = True
+    ) -> list[ExtractedImage]:
+        """
+        Extract images from all documents in a directory.
+        """
+        directory = Path(directory)
+        all_images = []
+        
+        pattern = '**/*' if recursive else '*'
+        extensions = ['.pdf']
+        
+        for file_path in directory.glob(pattern):
+            if file_path.is_file() and file_path.suffix.lower() in extensions:
+                try:
+                    images = self.extract_from_file(file_path)
+                    all_images.extend(images)
+                except Exception as e:
+                    print(f"Error processing {file_path}: {e}")
+        
+        return all_images
+
+    def get_vectorization_data(self, images: list[ExtractedImage]) -> list[dict]:
+        """
+        Prepare extracted images for vectorization.
+        """
+        data = []
+        for img in images:
+            data.append({
+                "chunk_id": f"img_{img.image_id}",
+                "content": img.get_vectorization_text(),
+                "metadata": {
+                    "type": "extracted_image",
+                    "region_type": img.region_type,
+                    "image_path": img.image_path,
+                    "source_file": img.source_file,
+                    "page_number": img.page_number,
+                    "bbox": str(img.bbox),
+                },
+                "source_file": img.source_file
+            })
+        return data
+
+
+# Global extractor instance
+_extractor: Optional[ImageExtractor] = None
+
+
+def get_image_extractor() -> ImageExtractor:
+    """Get or create the global image extractor instance."""
+    global _extractor
+    if _extractor is None:
+        _extractor = ImageExtractor()
+    return _extractor
 from typing import Optional
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -76,6 +312,9 @@ class ImageExtractionConfig:
     cluster_merge_distance: int = 50  # Pixels to merge nearby drawings
     min_drawing_size: int = 20  # Minimum size for a drawing path
     min_diagram_size: int = 100  # Minimum size for a clustered diagram
+    
+    # New config for full page extraction
+    extract_full_page: bool = True  # If True, extract full page if it contains images
 
 
 class ImageExtractor:
@@ -144,6 +383,11 @@ class ImageExtractor:
         
         print(f"Extracting images from: {pdf_path.name}")
         
+        # 1. Check if we should do full page extraction
+        if self.config.extract_full_page:
+            return self._extract_pages_with_images_pymupdf(pdf_path)
+
+        # Legacy: Extract specific regions
         # 1. Extract embedded images (bitmaps)
         extracted_images = self._extract_pdf_with_pymupdf(pdf_path)
         
@@ -154,6 +398,99 @@ class ImageExtractor:
         
         print(f"  Extracted {len(extracted_images)} images/drawings from {pdf_path.name}")
         return extracted_images
+
+    def _extract_pages_with_images_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract full pages as images if they contain any images or drawings.
+        
+        Args:
+            pdf_path: Path to the PDF file.
+            
+        Returns:
+            List of ExtractedImage objects (one per page with images).
+        """
+        try:
+            import fitz  # PyMuPDF
+            
+            doc = fitz.open(str(pdf_path))
+            extracted_pages = []
+            
+            print(f"  Scanning {len(doc)} pages for images...")
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                has_visuals = False
+                
+                # 1. Check for images
+                image_list = page.get_images(full=True)
+                if image_list:
+                    # Filter small icons/artifacts
+                    for img in image_list:
+                        xref = img[0]
+                        try:
+                            pix = fitz.Pixmap(doc, xref)
+                            if pix.width >= self.config.min_width and pix.height >= self.config.min_height:
+                                has_visuals = True
+                                pix = None
+                                break
+                            pix = None
+                        except:
+                            continue
+                
+                # 2. Check for drawings if no images found yet
+                if not has_visuals:
+                    drawings = page.get_drawings()
+                    for d in drawings:
+                        rect = d["rect"]
+                        if rect.width > 20 and rect.height > 20:
+                            has_visuals = True
+                            break
+                
+                if has_visuals:
+                    try:
+                        # Render full page
+                        # Use dpi=150 or 200 for good quality
+                        pix = page.get_pixmap(dpi=150)
+                        
+                        image_data = pix.tobytes("png")
+                        image_id = hashlib.md5(image_data).hexdigest()[:8]
+                        image_filename = f"{pdf_path.stem}_page_{page_num + 1}_{image_id}.png"
+                        image_path = self.config.output_dir / image_filename
+                        
+                        # Save image
+                        pix.save(str(image_path))
+                        pix = None
+                        
+                        # Get full page text
+                        text = page.get_text()
+                        
+                        extracted_pages.append(ExtractedImage(
+                            image_id=image_id,
+                            image_path=str(image_path),
+                            source_file=str(pdf_path),
+                            page_number=page_num + 1,
+                            bbox=(0, 0, page.rect.width, page.rect.height),
+                            region_type="full_page_image",
+                            surrounding_text=text,  # Full page text
+                            caption="",
+                            description=f"Full page image from {pdf_path.name}, page {page_num + 1}"
+                        ))
+                        
+                        print(f"    Captured Page {page_num + 1} as image (contains visuals)")
+                        
+                    except Exception as e:
+                        print(f"    Error capturing page {page_num + 1}: {e}")
+            
+            doc.close()
+            print(f"  Converted {len(extracted_pages)} pages to images from {pdf_path.name}")
+            return extracted_pages
+            
+        except ImportError:
+            print("  PyMuPDF not available")
+            return []
+        except Exception as e:
+            print(f"  Error with PyMuPDF: {e}")
+            return []
     
     def _extract_pdf_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
         """Extract images using PyMuPDF (fitz) - primary method."""

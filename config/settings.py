@@ -80,6 +80,7 @@ def ensure_directories():
     directories = [
         DOCUMENTS_DIR,
         INPUT_DOCS_DIR,
+        EXTRACTED_IMAGES_DIR,
         VECTORDB_DIR,
         FAISS_INDEX_DIR,
         MODELS_DIR,

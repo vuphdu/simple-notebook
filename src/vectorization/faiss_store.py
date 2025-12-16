@@ -205,6 +205,69 @@ class FaissVectorStore:
         
         self.add(ids, embeddings, documents, metadatas)
     
+    def update(
+        self,
+        ids: list[str],
+        embeddings: Optional[list[list[float]]] = None,
+        documents: Optional[list[str]] = None,
+        metadatas: Optional[list[dict]] = None
+    ):
+        """
+        Update vectors in the store.
+        
+        Strategy: Append new vectors to FAISS index and update mappings.
+        Old vectors remain in the index but are unreachable via ID mapping.
+        """
+        if not embeddings:
+            # If only updating metadata/content, we can just update the dicts
+            # But usually we update everything.
+            # For now, require embeddings for simplicity or handle metadata-only update
+            pass
+
+        if embeddings:
+            embeddings_np = np.array(embeddings, dtype=np.float32)
+            
+            # Normalize
+            if self.config.distance_metric == "cosine":
+                import faiss
+                faiss.normalize_L2(embeddings_np)
+            
+            # Add to index
+            start_idx = self._index.ntotal
+            self._index.add(embeddings_np)
+            
+            for i, doc_id in enumerate(ids):
+                new_idx = start_idx + i
+                
+                # Handle old mapping
+                old_idx = self._id_to_idx.get(doc_id)
+                if old_idx is not None:
+                    # Remove old index mapping so it won't be found in search
+                    self._idx_to_id.pop(old_idx, None)
+                
+                # Update mappings
+                self._id_to_idx[doc_id] = new_idx
+                self._idx_to_id[new_idx] = doc_id
+                
+                # Update content/metadata
+                if documents:
+                    self._documents[doc_id] = documents[i]
+                if metadatas:
+                    self._metadata[doc_id] = metadatas[i]
+            
+            self._save()
+            print(f"Updated {len(ids)} vectors in FAISS index")
+        
+        elif documents or metadatas:
+            # Metadata/Content only update
+            for i, doc_id in enumerate(ids):
+                if documents:
+                    self._documents[doc_id] = documents[i]
+                if metadatas:
+                    self._metadata[doc_id] = metadatas[i]
+            self._save()
+            print(f"Updated metadata/content for {len(ids)} items")
+    
     def search_similar(
         self,
         query_embedding: list[float],

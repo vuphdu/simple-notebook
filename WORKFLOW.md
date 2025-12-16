@@ -39,22 +39,16 @@ graph TD
     A[PDF Document] --> B(Image Extractor)
 
     subgraph Extraction Strategy
-    B --> C[Bitmap Extraction]
-    B --> D[Vector Drawing Extraction]
+    B --> C[Render Every Page]
     end
 
-    C -->|Raw Images| E{Validation Filter}
-    D -->|Rendered Regions| E
-
-    E -->|Too Dark/Uniform| F[Discard]
-    E -->|Valid Content| G[Save to Disk]
-
-    G -->|data/documents/extracted_images| H[PNG Files]
+    C --> D[Save Page Image]
+    C -->|data/documents/extracted_images| E[PNG Files]
 
     subgraph Context Indexing
-    B -->|Extract Surrounding Text| I[Image Context]
-    I --> J[Vectorizer]
-    J --> K[(Vector Store)]
+    D -->|Extract Page Text| H[Page Context]
+    H --> I[Vectorizer]
+    I --> J[(Vector Store)]
     end
 ```
 
@@ -105,4 +99,13 @@ python -m src.main extract-images
 ```bash
 python -m src.main search "your query here"
 # Runs Search Workflow
+```
+
+### Clean / Reset
+
+```bash
+python -m src.main clean
+# Clears all generated data (vectors, images, logs)
+# Use --all to also remove models
+# Use --yes to skip confirmation
 ```
