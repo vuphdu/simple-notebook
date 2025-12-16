@@ -13,6 +13,9 @@ import os
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config import settings, ensure_directories, EXTRACTED_IMAGES_DIR
+from PIL import Image, ImageOps
+import io
+import numpy as np
 
 
 @dataclass
@@ -62,6 +65,8 @@ class ImageExtractionConfig:
     image_format: str = "png"
     min_width: int = 50  # Minimum width to consider as valid image
     min_height: int = 50  # Minimum height
+    min_brightness: float = 20.0  # Minimum mean brightness (0-255) to avoid black images
+    min_std_dev: float = 10.0  # Minimum standard deviation to avoid solid color images
     extract_tables: bool = True
     extract_figures: bool = True
     context_chars: int = 500  # Number of characters to extract around image
@@ -134,15 +139,15 @@ class ImageExtractor:
         
         print(f"Extracting images from: {pdf_path.name}")
         
-        # Try PyMuPDF first (no external dependencies needed)
+        # 1. Extract embedded images (bitmaps)
         extracted_images = self._extract_pdf_with_pymupdf(pdf_path)
         
-        if not extracted_images:
-            # Fallback to pdf2image if PyMuPDF didn't find images
-            print("  Trying alternative extraction method...")
-            extracted_images = self._extract_pdf_with_pdf2image(pdf_path)
+        # 2. Extract vector drawings (diagrams)
+        if self.config.extract_figures:
+            drawings = self._extract_drawings_with_pymupdf(pdf_path)
+            extracted_images.extend(drawings)
         
-        print(f"  Extracted {len(extracted_images)} images from {pdf_path.name}")
+        print(f"  Extracted {len(extracted_images)} images/drawings from {pdf_path.name}")
         return extracted_images
     
     def _extract_pdf_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
@@ -164,25 +169,42 @@ class ImageExtractor:
                 for img_index, img in enumerate(image_list):
                     try:
                         xref = img[0]
-                        base_image = doc.extract_image(xref)
-                        image_bytes = base_image["image"]
-                        image_ext = base_image["ext"]
+                        
+                        # Use Pixmap to handle color spaces and masks correctly
+                        pix = fitz.Pixmap(doc, xref)
                         
                         # Check image size
-                        width = base_image.get("width", 0)
-                        height = base_image.get("height", 0)
-                        
-                        if width < self.config.min_width or height < self.config.min_height:
+                        if pix.width < self.config.min_width or pix.height < self.config.min_height:
+                            pix = None
                             continue
+                            
+                        # Handle alpha channel / color space
+                        # If CMYK or grayscale with alpha, convert to RGB
+                        if pix.n - pix.alpha < 3: 
+                            new_pix = fitz.Pixmap(fitz.csRGB, pix)
+                            pix = new_pix
                         
+                        # Store dimensions before clearing pix
+                        width = pix.width
+                        height = pix.height
+                            
                         # Generate image ID
-                        image_id = hashlib.md5(image_bytes).hexdigest()[:8]
-                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_img{img_index}_{image_id}.{image_ext}"
+                        image_data = pix.tobytes("png")
+                        
+                        # Validate image content (check for black/empty images)
+                        is_valid, _, _ = self._is_valid_image(image_data)
+                        
+                        if not is_valid:
+                            pix = None
+                            continue
+                            
+                        image_id = hashlib.md5(image_data).hexdigest()[:8]
+                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_img{img_index}_{image_id}.png"
                         image_path = self.config.output_dir / image_filename
                         
                         # Save image
-                        with open(image_path, "wb") as f:
-                            f.write(image_bytes)
+                        pix.save(str(image_path))
+                        pix = None  # Free memory
                         
                         # Get surrounding text
                         text = page.get_text()
@@ -210,8 +232,114 @@ class ImageExtractor:
             print("  PyMuPDF not available")
             return []
         except Exception as e:
-            print(f"  PyMuPDF error: {e}")
+            print(f"  Error with PyMuPDF: {e}")
             return []
+
+    def _extract_drawings_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """Extract vector drawings (diagrams) by rendering drawing paths."""
+        extracted_drawings = []
+        try:
+            import fitz
+            doc = fitz.open(str(pdf_path))
+            
+            print(f"  Scanning for vector drawings...")
+            
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                drawings = page.get_drawings()
+                
+                if not drawings:
+                    continue
+                    
+                # Filter small drawings and group them
+                valid_rects = []
+                for d in drawings:
+                    rect = d["rect"]
+                    # Filter out very small paths (e.g. bullets, table lines)
+                    if rect.width > 20 or rect.height > 20:
+                        valid_rects.append(rect)
+                
+                if not valid_rects:
+                    continue
+                
+                # Cluster rects to find diagram regions
+                # Simple approach: Merge all valid rects on the page for now
+                # (A more advanced approach would cluster them spatially)
+                # For HFP spec, diagrams usually take up a significant part of the page
+                
+                # Group intersecting or close rectangles
+                clusters = []
+                while valid_rects:
+                    rect = valid_rects.pop(0)
+                    merged = False
+                    for i, cluster in enumerate(clusters):
+                        # If rect is close to cluster (within 50 pixels), merge
+                        # Using a slightly larger expansion for clustering
+                        cluster_expanded = fitz.Rect(cluster)
+                        cluster_expanded.x0 -= 50
+                        cluster_expanded.y0 -= 50
+                        cluster_expanded.x1 += 50
+                        cluster_expanded.y1 += 50
+                        
+                        if rect.intersects(cluster_expanded):
+                            cluster.include_rect(rect)
+                            merged = True
+                            break
+                    if not merged:
+                        clusters.append(rect)
+                
+                # Process clusters
+                for i, rect in enumerate(clusters):
+                    # Check if cluster is big enough to be a diagram
+                    if rect.width < 100 or rect.height < 100:
+                        continue
+                        
+                    # Render the region
+                    # Use higher DPI for better quality
+                    try:
+                        pix = page.get_pixmap(clip=rect, dpi=150)
+                        
+                        # Check validity
+                        image_data = pix.tobytes("png")
+                        is_valid, _, _ = self._is_valid_image(image_data)
+                        
+                        if not is_valid:
+                            pix = None
+                            continue
+                            
+                        # Save
+                        image_id = hashlib.md5(image_data).hexdigest()[:8]
+                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_drawing{i}_{image_id}.png"
+                        image_path = self.config.output_dir / image_filename
+                        
+                        pix.save(str(image_path))
+                        
+                        # Get text
+                        text = page.get_text(clip=rect)
+                        
+                        extracted_drawings.append(ExtractedImage(
+                            image_id=image_id,
+                            image_path=str(image_path),
+                            source_file=str(pdf_path),
+                            page_number=page_num + 1,
+                            bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
+                            region_type="drawing",
+                            surrounding_text=text[:self.config.context_chars],
+                            caption="",
+                            description=f"Drawing from {pdf_path.name}, page {page_num + 1}"
+                        ))
+                        pix = None
+                        
+                    except Exception as e:
+                        print(f"    Error rendering drawing on page {page_num + 1}: {e}")
+
+            doc.close()
+        except Exception as e:
+            print(f"Error extracting drawings: {e}")
+            
+        return extracted_drawings
+            
+
     
     def _extract_pdf_with_pdf2image(self, pdf_path: Path) -> list[ExtractedImage]:
         """Extract images using pdf2image and PP-Structure."""
@@ -477,6 +605,42 @@ class ImageExtractor:
         
         return all_images
     
+    def _is_valid_image(self, image_data: bytes) -> tuple[bool, str, dict]:
+        """
+        Check if image is valid (not too dark, not solid color).
+        
+        Args:
+            image_data: Image data in bytes (PNG format).
+            
+        Returns:
+            Tuple (is_valid, reason, stats_dict)
+        """
+        stats = {"brightness": 0, "std_dev": 0}
+        try:
+            with Image.open(io.BytesIO(image_data)) as img:
+                # Convert to grayscale for analysis
+                gray = img.convert('L')
+                np_img = np.array(gray)
+                
+                # Calculate statistics
+                mean_brightness = np.mean(np_img)
+                std_dev = np.std(np_img)
+                
+                stats["brightness"] = mean_brightness
+                stats["std_dev"] = std_dev
+                
+                # Check brightness (avoid black images)
+                if mean_brightness < self.config.min_brightness:
+                    return False, f"Too dark (brightness={mean_brightness:.2f} < {self.config.min_brightness})", stats
+                
+                # Check variance (avoid solid color images)
+                if std_dev < self.config.min_std_dev:
+                    return False, f"Low variance (std_dev={std_dev:.2f} < {self.config.min_std_dev})", stats
+                    
+                return True, "OK", stats
+        except Exception as e:
+            return False, f"Error: {e}", stats
+
     def get_vectorization_data(self, images: list[ExtractedImage]) -> list[dict]:
         """
         Prepare extracted images for vectorization.
