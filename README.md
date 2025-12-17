@@ -1,6 +1,6 @@
 # Simple RAG System
 
-A simple Retrieval-Augmented Generation (RAG) system with chunking, vectorization, and search capabilities.
+A lean and efficient Retrieval-Augmented Generation (RAG) system with smart image extraction, chunking, vectorization, and semantic search capabilities.
 
 ## Features
 
@@ -8,8 +8,8 @@ A simple Retrieval-Augmented Generation (RAG) system with chunking, vectorizatio
 - **Vectorization**: Convert text chunks to vectors using Alibaba-NLP/gte-multilingual-base model
 - **Sequence Chart Processing**: Extract and process sequence diagrams with image export and description vectorization
 - **Semantic Search**: Search through vectorized documents with similarity matching
-- **Dual Backend Support**: Choose between FAISS (fast) or ChromaDB (full-featured)
-- **Image Extraction**: Extract images and vector drawings from documents using PyMuPDF (fitz) or PaddleOCR
+- **Dual Backend Support**: Choose between FAISS (fast, default) or ChromaDB (full-featured)
+- **Smart Image Extraction**: Extract images and vector drawings from PDFs using PyMuPDF intelligent clustering
 - **Context Updates**: Manually add context/notes to specific documents or images to improve searchability
 
 ## Directory Structure
@@ -31,7 +31,7 @@ simple-notebook/
 │   ├── vectorization/          # Text vectorization module
 │   ├── search/                 # Search and retrieval module
 │   ├── sequence_chart/         # Sequence chart processing
-│   └── image_extraction/       # Image extraction with PyMuPDF & PaddleOCR
+│   └── image_extraction/       # Smart image extraction with PyMuPDF
 ├── config/                     # Configuration files
 └── tests/                      # Unit tests
 ```
@@ -39,7 +39,7 @@ simple-notebook/
 ## Installation
 
 ```bash
-# Install base requirements
+# Install requirements
 pip install -r requirements.txt
 ```
 
@@ -53,20 +53,21 @@ python -m src.main init
 
 ### 2. Process documents
 
-You can process documents using the default PyMuPDF extractor or the advanced PaddleOCR extractor.
-
-**Default (PyMuPDF - Fast, Smart Cropping):**
+Process documents with smart image extraction (automatically enabled):
 
 ```bash
+python -m src.main process
+# OR specify input directory
 python -m src.main process --input data/documents
 ```
 
-**Advanced (PaddleOCR - AI Layout Analysis):**
-_Requires `paddlepaddle` and `paddleocr` installed._
+This will:
 
-```bash
-python -m src.main process --input data/documents --mode paddle
-```
+- Extract text from PDFs, DOCX, TXT, and MD files
+- Smart crop images and diagrams from PDFs
+- Process sequence charts
+- Vectorize all content
+- Store in vector database
 
 ### 3. Search
 
@@ -76,7 +77,7 @@ python -m src.main search "authentication flow"
 
 Input/output will be saved in `/process/input/` and `/process/output/`.
 
-### 4. Update Context (New)
+### 4. Update Context
 
 Add manual notes or context to a specific document or image to make it easier to find.
 
@@ -88,7 +89,7 @@ python -m src.main update "page 100" "This diagram shows the login process"
 ### 5. Extract images only
 
 ```bash
-# Extract images and vectorize descriptions (PyMuPDF only)
+# Extract images and vectorize descriptions
 python -m src.main extract-images --input data/documents
 
 # Extract images only (no vectorization)
@@ -122,23 +123,28 @@ This system uses **Alibaba-NLP/gte-multilingual-base** for text embedding:
 
 - First run downloads the model to `/models/`
 - Subsequent runs use the cached model
+- Embedding dimension: 768
+- Supports 70+ languages
 
-## Image Extraction
+## Smart Image Extraction
 
-The system supports two modes for image extraction:
+The system uses **PyMuPDF** for intelligent image extraction:
 
-### 1. PyMuPDF (Default)
+### Features
 
-- **Fast & Lightweight**: Uses direct PDF parsing.
-- **Smart Cropping**: Automatically detects and crops figures and vector drawings.
-- **Best for**: Vector graphics, embedded images, and clean PDFs.
+- **Fast & Lightweight**: Direct PDF parsing with no external dependencies
+- **Smart Cropping**: Automatically detects and extracts figures, diagrams, and vector drawings
+- **Vector Drawing Clustering**: Groups nearby vector paths into coherent diagrams
+- **Context Extraction**: Captures surrounding text for better searchability
+- **Embedded Images**: Extracts all bitmap images from PDFs
 
-### 2. PaddleOCR (Advanced)
+### How It Works
 
-- **AI-Powered**: Uses PP-Structure for layout analysis.
-- **Subprocess Execution**: Runs in a separate process to avoid DLL conflicts with PyTorch.
-- **Best for**: Complex layouts, scanned documents, and identifying regions like tables and figures.
-- **Usage**: Add `--mode paddle` to the process command.
+1. **Detects embedded images**: Finds all bitmap images in the PDF
+2. **Clusters vector drawings**: Groups nearby vector paths (lines, shapes) into diagrams
+3. **Merges nearby regions**: Combines overlapping or adjacent elements
+4. **Extracts context**: Captures surrounding text as metadata
+5. **Saves as PNG**: All extracted regions saved in `extracted_images/`
 
 ## Vector Store Backends
 
@@ -152,12 +158,62 @@ backend: str = "faiss"  # Fast similarity search
 faiss_index_type: str = "Flat"  # Options: Flat, IVF, HNSW
 ```
 
+**Benefits:**
+
+- Extremely fast similarity search
+- Low memory footprint
+- Good for local/single-machine deployments
+
 ### ChromaDB (Alternative - Full-featured)
 
 ```python
 # In config/settings.py
 backend: str = "chromadb"  # Persistent, with metadata filtering
 ```
+
+**Benefits:**
+
+- Rich metadata filtering
+- Built-in persistence
+- Easy to inspect and debug
+
+## CLI Commands
+
+```bash
+# Process documents
+python -m src.main process [--input DIR] [--no-charts]
+
+# Search
+python -m src.main search "query" [--top-k K] [--no-save]
+
+# Extract images
+python -m src.main extract-images [--input PATH] [--no-vectorize]
+
+# Update context
+python -m src.main update "query" "new context" [--yes]
+
+# View stats
+python -m src.main stats
+
+# Clean data
+python -m src.main clean [--all] [--yes]
+
+# Initialize
+python -m src.main init
+```
+
+## Dependencies
+
+### Core (17 packages)
+
+- **Deep Learning**: torch, transformers, sentence-transformers
+- **Vector DB**: chromadb, faiss-cpu
+- **Document Processing**: langchain-text-splitters, python-docx, PyPDF2, pymupdf
+- **Image Processing**: Pillow
+- **Utilities**: pydantic, tqdm, numpy
+- **Testing**: pytest, pytest-asyncio
+
+All lean and actively used!
 
 ## License
 

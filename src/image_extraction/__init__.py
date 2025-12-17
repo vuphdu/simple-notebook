@@ -1,21 +1,14 @@
-"""Image Extraction module using PyMuPDF or PaddleOCR PP-Structure."""
+"""Image extraction package."""
 from .extractor import (
     ImageExtractor,
-    ExtractedImage,
     ImageExtractionConfig,
+    ExtractedImage,
     get_image_extractor,
-    check_paddle_installation,
-    print_paddle_status,
 )
 
 __all__ = [
-    # Image extraction
     "ImageExtractor",
-    "ExtractedImage",
     "ImageExtractionConfig",
+    "ExtractedImage",
     "get_image_extractor",
-    # Paddle utilities
-    "check_paddle_installation",
-    "print_paddle_status",
 ]
-

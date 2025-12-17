@@ -8,24 +8,13 @@ chromadb>=0.4.0
 faiss-cpu>=1.7.4
 
 # Document processing
-langchain>=0.1.0
-langchain-community>=0.0.10
 langchain-text-splitters>=0.0.1
-
-# File handling
 python-docx>=0.8.11
 PyPDF2>=3.0.0
-PyMuPDF>=1.23.0
 
-# Image processing
+# Image extraction (PyMuPDF smart cropping)
+pymupdf>=1.24.0
 Pillow>=10.0.0
-
-# OCR / Layout Analysis (Optional - for --mode paddle)
-paddlepaddle>=2.6.0
-paddleocr>=2.7.0
-opencv-python>=4.8.0
-
-# PaddleOCR removed (using PyMuPDF for page extraction)
 
 # Utilities
 pydantic>=2.0.0

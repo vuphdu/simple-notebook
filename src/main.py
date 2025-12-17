@@ -20,14 +20,12 @@ from src.chunking import DocumentChunker, chunk_documents
 from src.vectorization import TextVectorizer, VectorStore, get_vectorizer, get_vector_store
 from src.search import SearchEngine, get_search_engine
 from src.sequence_chart import SequenceChartProcessor, get_chart_processor
-from src.sequence_chart import SequenceChartProcessor, get_chart_processor
-from src.image_extraction import ImageExtractor, get_image_extractor, check_paddle_installation, print_paddle_status
+from src.image_extraction import ImageExtractor, get_image_extractor
 
 
 def process_documents(
     input_dir: Optional[Path] = None,
-    include_charts: bool = True,
-    mode: str = "pymupdf"
+    include_charts: bool = True
 ):
     """
     Process all documents in the input directory.
@@ -71,12 +69,9 @@ def process_documents(
         vectorized_chunks = vectorizer.vectorize_chunks(chunks)
         all_vectorized.extend(vectorized_chunks)
     
-    # 2. Process PDFs as Images (Full Page Extraction)
-    print(f"\n[2a] Processing PDFs (Mode: {mode})...")
-    # We use the image extractor for PDFs
+    # 2. Process PDFs (Extract Images)
+    print("\n[2a] Extracting images from PDFs...")
     extractor = get_image_extractor()
-    extractor.config.extraction_mode = mode
-    # Find all PDFs
     pdf_files = list(input_dir.glob("**/*.pdf"))
     print(f"Found {len(pdf_files)} PDF files")
     
@@ -379,13 +374,6 @@ def main():
         action="store_true",
         help="Skip sequence chart processing"
     )
-    process_parser.add_argument(
-        "--mode", "-m",
-        type=str,
-        choices=["pymupdf", "paddle"],
-        default="pymupdf",
-        help="Image extraction mode: 'pymupdf' (default, smart crop) or 'paddle' (AI layout)"
-    )
     
     # Search command
     search_parser = subparsers.add_parser(
@@ -475,11 +463,7 @@ def main():
         help="Skip confirmation"
     )
     
-    # Check Paddle command
-    subparsers.add_parser(
-        "check-paddle",
-        help="Check PaddleOCR installation status"
-    )
+
     
     args = parser.parse_args()
     
@@ -487,28 +471,9 @@ def main():
     ensure_directories()
     
     if args.command == "process":
-        # Check paddle availability if paddle mode is requested
-        if args.mode == "paddle":
-            paddle_status = check_paddle_installation()
-            if not paddle_status['available']:
-                print("=" * 60)
-                print("WARNING: PaddleOCR is not properly installed!")
-                print("=" * 60)
-                print(f"\n{paddle_status['message']}")
-                if paddle_status['tips']:
-                    print("\nTo install:")
-                    for tip in paddle_status['tips']:
-                        print(f"  {tip}")
-                print("\nFalling back to 'pymupdf' mode...")
-                print("=" * 60 + "\n")
-                args.mode = "pymupdf"
-            else:
-                print("PaddleOCR is available. Using AI layout analysis mode.")
-        
         process_documents(
             input_dir=args.input,
-            include_charts=not args.no_charts,
-            mode=args.mode
+            include_charts=not args.no_charts
         )
     
     elif args.command == "search":
@@ -547,8 +512,7 @@ def main():
             confirm=not args.yes
         )
     
-    elif args.command == "check-paddle":
-        print_paddle_status()
+
     
     else:
         parser.print_help()

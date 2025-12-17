@@ -177,7 +177,7 @@ class SearchEngine:
         output_file = PROCESS_OUTPUT_DIR / f"{query_id}.json"
         with open(output_file, "w", encoding="utf-8") as f:
             json.dump(output_data, f, ensure_ascii=False, indent=2)
-        
+       
         print(f"Search completed. Input: {input_file}, Output: {output_file}")
         
         return results
@@ -235,13 +235,52 @@ class SearchEngine:
                 lines.append(f"```\n{r.document}\n```\n")
             return "\n".join(lines)
         
-        else:  # text
+        else:  # text - IMPROVED FORMAT
             lines = [f"Found {len(results)} results:\n"]
             for r in results:
-                lines.append(f"[{r.rank}] Score: {r.similarity:.4f}")
-                lines.append(f"    Source: {r.metadata.get('source_file', 'Unknown')}")
-                lines.append(f"    Content: {r.document[:200]}...")
-                lines.append("")
+                # Determine result type
+                result_type = r.metadata.get('type', 'text_chunk')
+                is_image = result_type == 'extracted_image'
+                
+                # Header with type indicator
+                type_label = "[IMAGE]" if is_image else "[TEXT]"
+                lines.append(f"[{r.rank}] Score: {r.similarity:.4f} {type_label}")
+                
+                # Source file
+                source = r.metadata.get('source_file', 'Unknown')
+                lines.append(f"    Source: {source}")
+                
+                # Type-specific metadata
+                if is_image:
+                    # Image-specific info
+                    image_path = r.metadata.get('image_path', 'N/A')
+                    page_num = r.metadata.get('page_number', 'N/A')
+                    region_type = r.metadata.get('region_type', 'N/A')
+                    
+                    lines.append(f"    📷 Image: {image_path}")
+                    lines.append(f"    📄 Page: {page_num}")
+                    lines.append(f"    🎯 Type: {region_type}")
+                    
+                    # Show full context for images
+                    lines.append(f"    Content: {r.document}")
+                else:
+                    # Text chunk info
+                    page_num = r.metadata.get('page_number', r.metadata.get('chunk_index', 'N/A'))
+                    lines.append(f"    📄 Page/Chunk: {page_num}")
+                    
+                    # Show more content (no hard truncation)
+                    if len(r.document) > 300:
+                        lines.append(f"    Content:")
+                        # Indent for readability
+                        content_lines = r.document.split('\n')
+                        for content_line in content_lines[:20]:
+                            lines.append(f"        {content_line}")
+                        if len(content_lines) > 20:
+                            lines.append(f"        ... ({len(content_lines) - 20} more lines)")
+                    else:
+                        lines.append(f"    Content: {r.document}")
+                
+                lines.append("")  # Blank line between results
             return "\n".join(lines)
 
 
