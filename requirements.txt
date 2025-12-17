@@ -20,6 +20,11 @@ PyMuPDF>=1.23.0
 # Image processing
 Pillow>=10.0.0
 
+# OCR / Layout Analysis (Optional - for --mode paddle)
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
+opencv-python>=4.8.0
+
 # PaddleOCR removed (using PyMuPDF for page extraction)
 
 # Utilities

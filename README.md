@@ -9,7 +9,8 @@ A simple Retrieval-Augmented Generation (RAG) system with chunking, vectorizatio
 - **Sequence Chart Processing**: Extract and process sequence diagrams with image export and description vectorization
 - **Semantic Search**: Search through vectorized documents with similarity matching
 - **Dual Backend Support**: Choose between FAISS (fast) or ChromaDB (full-featured)
-- **Image Extraction**: Extract images and vector drawings from documents using PyMuPDF (fitz)
+- **Image Extraction**: Extract images and vector drawings from documents using PyMuPDF (fitz) or PaddleOCR
+- **Context Updates**: Manually add context/notes to specific documents or images to improve searchability
 
 ## Directory Structure
 
@@ -30,7 +31,7 @@ simple-notebook/
 │   ├── vectorization/          # Text vectorization module
 │   ├── search/                 # Search and retrieval module
 │   ├── sequence_chart/         # Sequence chart processing
-│   └── image_extraction/       # Image extraction with PyMuPDF
+│   └── image_extraction/       # Image extraction with PyMuPDF & PaddleOCR
 ├── config/                     # Configuration files
 └── tests/                      # Unit tests
 ```
@@ -52,8 +53,19 @@ python -m src.main init
 
 ### 2. Process documents
 
+You can process documents using the default PyMuPDF extractor or the advanced PaddleOCR extractor.
+
+**Default (PyMuPDF - Fast, Smart Cropping):**
+
 ```bash
 python -m src.main process --input data/documents
+```
+
+**Advanced (PaddleOCR - AI Layout Analysis):**
+_Requires `paddlepaddle` and `paddleocr` installed._
+
+```bash
+python -m src.main process --input data/documents --mode paddle
 ```
 
 ### 3. Search
@@ -62,27 +74,36 @@ python -m src.main process --input data/documents
 python -m src.main search "authentication flow"
 ```
 
-Input/output sẽ được lưu trong `/process/input/` và `/process/output/`
+Input/output will be saved in `/process/input/` and `/process/output/`.
 
-### 4. Extract images from documents
+### 4. Update Context (New)
+
+Add manual notes or context to a specific document or image to make it easier to find.
 
 ```bash
-# Extract images and vectorize descriptions
+# Search for a document and add context
+python -m src.main update "page 100" "This diagram shows the login process"
+```
+
+### 5. Extract images only
+
+```bash
+# Extract images and vectorize descriptions (PyMuPDF only)
 python -m src.main extract-images --input data/documents
 
 # Extract images only (no vectorization)
 python -m src.main extract-images --input data/documents/file.pdf --no-vectorize
 ```
 
-Extracted images will be saved in `data/documents/extracted_images/`
+Extracted images will be saved in `data/documents/extracted_images/`.
 
-### 5. View statistics
+### 6. View statistics
 
 ```bash
 python -m src.main stats
 ```
 
-### 6. Clean extracted data
+### 7. Clean extracted data
 
 ```bash
 # Clean vectordb and process logs (with confirmation)
@@ -104,17 +125,20 @@ This system uses **Alibaba-NLP/gte-multilingual-base** for text embedding:
 
 ## Image Extraction
 
-The system uses **PyMuPDF (fitz)** for robust image extraction:
+The system supports two modes for image extraction:
 
-- **Bitmap Extraction**: Extracts embedded images (PNG, JPEG, etc.).
-- **Vector Drawing Extraction**: Detects and renders vector graphics (diagrams, charts) drawn directly on PDF pages.
-- **Smart Filtering**: Automatically filters out invalid images (solid black/white blocks) using brightness and variance checks.
-- **Performance**: Optimized with direct buffer access and efficient clustering algorithms.
-- **Vectorization**: Stores image descriptions (surrounding text) for semantic search.
+### 1. PyMuPDF (Default)
 
-Supported document types:
+- **Fast & Lightweight**: Uses direct PDF parsing.
+- **Smart Cropping**: Automatically detects and crops figures and vector drawings.
+- **Best for**: Vector graphics, embedded images, and clean PDFs.
 
-- PDF files
+### 2. PaddleOCR (Advanced)
+
+- **AI-Powered**: Uses PP-Structure for layout analysis.
+- **Subprocess Execution**: Runs in a separate process to avoid DLL conflicts with PyTorch.
+- **Best for**: Complex layouts, scanned documents, and identifying regions like tables and figures.
+- **Usage**: Add `--mode paddle` to the process command.
 
 ## Vector Store Backends
 
@@ -134,26 +158,6 @@ faiss_index_type: str = "Flat"  # Options: Flat, IVF, HNSW
 # In config/settings.py
 backend: str = "chromadb"  # Persistent, with metadata filtering
 ```
-
-**FAISS Index Types:**
-| Type | Use Case |
-|------|----------|
-| `Flat` | Exact search, best for <100k vectors |
-| `IVF` | Approximate search, good for large datasets |
-| `HNSW` | Graph-based, balanced speed/accuracy |
-
-## Main Features
-
-🔧 Tính năng chính
-
-| Module           | Mô tả                                                         |
-| ---------------- | ------------------------------------------------------------- |
-| Chunking         | Chia tài liệu (TXT, MD, PDF, DOCX) thành chunks nhỏ           |
-| Vectorization    | Chuyển text → vector với Alibaba-NLP/gte-multilingual-base    |
-| Vector Store     | Lưu trữ với **FAISS** (default) hoặc ChromaDB                 |
-| Search           | Tìm kiếm semantic với cosine similarity                       |
-| Sequence Chart   | Parse Mermaid diagrams → export image + vectorize description |
-| Image Extraction | Trích xuất hình ảnh & vector drawings từ tài liệu với PyMuPDF |
 
 ## License
 

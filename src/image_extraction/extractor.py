@@ -1,8 +1,8 @@
 """
-Image Extraction Module using PyMuPDF
+Image Extraction Module
 
-This module provides functionality to extract full pages as images from documents
-if they contain visual elements (images or vector drawings).
+This module provides functionality to extract images and figures from documents
+using either PyMuPDF (Smart Cropping) or PaddleOCR (AI Layout Analysis).
 """
 from typing import Optional
 from pathlib import Path
@@ -10,11 +10,17 @@ from dataclasses import dataclass, field
 import hashlib
 import io
 import numpy as np
-
 import sys
+
+# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config import settings, ensure_directories, EXTRACTED_IMAGES_DIR
 from PIL import Image
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
 
 
 @dataclass
@@ -25,7 +31,7 @@ class ExtractedImage:
     source_file: str
     page_number: int
     bbox: tuple  # (x1, y1, x2, y2)
-    region_type: str  # "full_page_image"
+    region_type: str  # "smart_crop", "figure", "table", "full_page_image"
     surrounding_text: str = ""
     caption: str = ""
     description: str = ""
@@ -65,18 +71,21 @@ class ImageExtractionConfig:
     min_width: int = 50  # Minimum width to consider as valid image
     min_height: int = 50  # Minimum height
     
-    # Config for full page extraction
-    extract_full_page: bool = True  # Always True in this optimized version
+    # Clustering config
+    cluster_merge_distance: int = 50  # Pixels to merge nearby drawings
+    min_drawing_size: int = 20  # Minimum size for a drawing path
+    min_diagram_size: int = 100  # Minimum size for a clustered diagram
+    
+    # Config for extraction strategy
+    extract_full_page: bool = False  # Set to False to prefer smart cropping
+    smart_crop: bool = True  # Enable smart cropping of figures/diagrams
+    extraction_mode: str = "pymupdf"  # "pymupdf" or "paddle"
+    use_gpu: bool = False
 
-
-try:
-    import fitz
-except ImportError:
-    fitz = None
 
 class ImageExtractor:
     """
-    Extracts full pages as images from documents using PyMuPDF.
+    Extracts image regions from documents using PyMuPDF or PaddleOCR.
     """
     
     def __init__(self, config: Optional[ImageExtractionConfig] = None):
@@ -87,22 +96,23 @@ class ImageExtractor:
             config: Image extraction configuration.
         """
         self.config = config or ImageExtractionConfig()
+        self._structure_engine = None
         ensure_directories()
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         
         if fitz is None:
             print("Warning: PyMuPDF (fitz) is not installed. Image extraction will not work.")
             print("Install with: pip install pymupdf")
-    
+
     def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
         """
-        Extract full pages as images if they contain any images or drawings.
+        Extract images from a PDF file.
         
         Args:
             pdf_path: Path to the PDF file.
             
         Returns:
-            List of ExtractedImage objects (one per page with images).
+            List of ExtractedImage objects.
         """
         if fitz is None:
             print("  PyMuPDF not available. Install with: pip install pymupdf")
@@ -112,18 +122,208 @@ class ImageExtractor:
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
             
+        print(f"Extracting images from: {pdf_path.name} (Mode: {self.config.extraction_mode})")
+        
+        # Mode Selection
+        if self.config.extraction_mode == "paddle":
+            return self._extract_with_paddle(pdf_path)
+            
+        # Default: PyMuPDF Smart Cropping
+        if self.config.smart_crop:
+            return self._extract_smart_crops(pdf_path)
+            
+        # Fallback: Full Page
+        if self.config.extract_full_page:
+            return self._extract_pages_with_images_pymupdf(pdf_path)
+            
+        return []
+
+    def _extract_with_paddle(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract images using PaddleOCR PP-Structure via subprocess.
+        
+        Runs PaddleOCR in a separate process to avoid DLL conflicts with PyTorch
+        and to isolate potential crashes from oneDNN/MKL-DNN backends.
+        """
+        import subprocess
+        import json
+        import tempfile
+        import os
+        import threading
+        
+        worker_script = Path(__file__).parent / "paddle_worker.py"
+        if not worker_script.exists():
+            print("  Error: paddle_worker.py not found")
+            return []
+        
+        print(f"  PaddleOCR extraction starting (isolated subprocess)...")
+        print(f"  Note: This may take a while on first run (model download)")
+        
+        # Create temp file for JSON output
+        fd, json_output_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        
+        try:
+            # Build command
+            cmd = [
+                sys.executable,
+                str(worker_script),
+                "--pdf", str(pdf_path),
+                "--output", str(self.config.output_dir),
+                "--json-output", str(json_output_path)
+            ]
+            if self.config.use_gpu:
+                cmd.append("--gpu")
+            
+            # Create isolated environment to prevent DLL conflicts
+            env = os.environ.copy()
+            
+            # Disable oneDNN/MKL-DNN which causes crashes on Windows
+            env["FLAGS_use_mkldnn"] = "0"
+            env["FLAGS_use_gpu"] = "0"
+            env["MKLDNN_VERBOSE"] = "0"
+            env["DNNL_VERBOSE"] = "0"
+            env["PADDLE_WITH_MKLDNN"] = "0"
+            
+            # Limit threads to prevent resource conflicts
+            env["OMP_NUM_THREADS"] = "2"
+            env["MKL_NUM_THREADS"] = "2"
+            
+            # Suppress excessive logging
+            env["GLOG_v"] = "0"
+            env["GLOG_logtostderr"] = "0"
+            env["GLOG_minloglevel"] = "3"
+            env["TF_CPP_MIN_LOG_LEVEL"] = "3"
+            
+            # For newer PaddlePaddle versions
+            env["FLAGS_enable_pir_in_executor"] = "0"
+            
+            # Function to print stderr in real-time
+            def print_stderr(pipe):
+                for line in iter(pipe.readline, ''):
+                    if line.strip():
+                        print(f"  {line.strip()}")
+                pipe.close()
+            
+            # Run subprocess with timeout
+            # Timeout: 5 minutes per PDF (adjust as needed)
+            timeout_seconds = 300
+            
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='replace',
+                env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            
+            # Stream stderr output in a separate thread
+            stderr_thread = threading.Thread(target=print_stderr, args=(process.stderr,))
+            stderr_thread.daemon = True
+            stderr_thread.start()
+            
+            try:
+                stdout, _ = process.communicate(timeout=timeout_seconds)
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                print(f"  PaddleOCR worker timed out after {timeout_seconds}s")
+                self._cleanup_temp_file(json_output_path)
+                return []
+            
+            # Wait for stderr thread to finish
+            stderr_thread.join(timeout=1)
+            
+            if returncode != 0:
+                print(f"  PaddleOCR worker exited with code {returncode}")
+                # Try to read partial results anyway
+                if not os.path.exists(json_output_path):
+                    self._cleanup_temp_file(json_output_path)
+                    return []
+            
+            # Parse output from file
+            if not os.path.exists(json_output_path):
+                print(f"  PaddleOCR output file not found")
+                return []
+                
+            try:
+                with open(json_output_path, "r", encoding="utf-8") as f:
+                    output_data = json.load(f)
+            except json.JSONDecodeError as e:
+                print(f"  Failed to parse PaddleOCR output: {e}")
+                self._cleanup_temp_file(json_output_path)
+                return []
+            finally:
+                self._cleanup_temp_file(json_output_path)
+            
+            # Check for error response
+            if isinstance(output_data, dict) and "error" in output_data:
+                error_msg = output_data['error']
+                # Provide helpful error messages
+                if "paddleocr" in error_msg.lower() or "paddle" in error_msg.lower():
+                    print(f"  PaddleOCR error: {error_msg[:200]}")
+                    print(f"  Tip: Try 'pip install paddlepaddle paddleocr' or use --mode pymupdf")
+                else:
+                    print(f"  PaddleOCR error: {error_msg[:500]}")
+                return []
+            
+            # Convert to ExtractedImage objects
+            extracted_images = []
+            for item in output_data:
+                try:
+                    extracted_images.append(ExtractedImage(
+                        image_id=item["image_id"],
+                        image_path=item["image_path"],
+                        source_file=item["source_file"],
+                        page_number=item["page_number"],
+                        bbox=tuple(item["bbox"]),
+                        region_type=item["region_type"],
+                        surrounding_text=item.get("surrounding_text", ""),
+                        caption=item.get("caption", ""),
+                        description=item.get("description", "")
+                    ))
+                except KeyError as e:
+                    print(f"  Warning: Skipping malformed result: missing {e}")
+                    continue
+            
+            print(f"  Extracted {len(extracted_images)} items with PaddleOCR from {pdf_path.name}")
+            return extracted_images
+            
+        except Exception as e:
+            print(f"  Error in PaddleOCR extraction: {e}")
+            import traceback
+            traceback.print_exc()
+            self._cleanup_temp_file(json_output_path)
+            return []
+    
+    def _cleanup_temp_file(self, filepath: str):
+        """Safely remove a temporary file."""
+        import os
+        try:
+            if filepath and os.path.exists(filepath):
+                os.unlink(filepath)
+        except Exception:
+            pass
+
+    def _extract_pages_with_images_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract full pages as images if they contain any images or drawings.
+        """
         try:
             doc = fitz.open(str(pdf_path))
             extracted_pages = []
             
-            print(f"Scanning {len(doc)} pages in {pdf_path.name}...")
+            print(f"  Scanning {len(doc)} pages in {pdf_path.name}...")
             
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 
                 try:
                     # Render full page
-                    # Use dpi=150 or 200 for good quality
                     pix = page.get_pixmap(dpi=150)
                     
                     image_data = pix.tobytes("png")
@@ -145,12 +345,10 @@ class ImageExtractor:
                         page_number=page_num + 1,
                         bbox=(0, 0, page.rect.width, page.rect.height),
                         region_type="full_page_image",
-                        surrounding_text=text,  # Full page text
+                        surrounding_text=text,
                         caption="",
                         description=f"Full page image from {pdf_path.name}, page {page_num + 1}"
                     ))
-                    
-                    # print(f"    Captured Page {page_num + 1}")
                     
                 except Exception as e:
                     print(f"    Error capturing page {page_num + 1}: {e}")
@@ -162,16 +360,10 @@ class ImageExtractor:
         except Exception as e:
             print(f"  Error with PyMuPDF: {e}")
             return []
-    
+
     def extract_from_file(self, file_path: Path) -> list[ExtractedImage]:
         """
         Extract images from a file.
-        
-        Args:
-            file_path: Path to the file.
-            
-        Returns:
-            List of ExtractedImage objects.
         """
         file_path = Path(file_path)
         suffix = file_path.suffix.lower()
@@ -179,8 +371,6 @@ class ImageExtractor:
         if suffix == '.pdf':
             return self.extract_from_pdf(file_path)
         else:
-            # For now, we only support PDF full page extraction
-            # If user wants to ingest raw images, we could add that later
             print(f"Skipping non-PDF file: {file_path.name}")
             return []
     
@@ -240,834 +430,105 @@ def get_image_extractor() -> ImageExtractor:
     if _extractor is None:
         _extractor = ImageExtractor()
     return _extractor
-from typing import Optional
-from pathlib import Path
-from dataclasses import dataclass, field
-import hashlib
-import os
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from config import settings, ensure_directories, EXTRACTED_IMAGES_DIR
-from PIL import Image, ImageOps
-import io
-import numpy as np
 
 
-@dataclass
-class ExtractedImage:
-    """Represents an extracted image region from a document."""
-    image_id: str
-    image_path: str
-    source_file: str
-    page_number: int
-    bbox: tuple  # (x1, y1, x2, y2)
-    region_type: str  # "figure", "table", "chart", etc.
-    surrounding_text: str = ""
-    caption: str = ""
-    description: str = ""
-    
-    def to_dict(self) -> dict:
-        return {
-            "image_id": self.image_id,
-            "image_path": self.image_path,
-            "source_file": self.source_file,
-            "page_number": self.page_number,
-            "bbox": self.bbox,
-            "region_type": self.region_type,
-            "surrounding_text": self.surrounding_text,
-            "caption": self.caption,
-            "description": self.description,
-        }
-    
-    def get_vectorization_text(self) -> str:
-        """Generate text for vectorization."""
-        parts = []
-        if self.caption:
-            parts.append(f"Caption: {self.caption}")
-        if self.description:
-            parts.append(f"Description: {self.description}")
-        if self.surrounding_text:
-            parts.append(f"Context: {self.surrounding_text}")
-        parts.append(f"Type: {self.region_type}")
-        parts.append(f"Source: {Path(self.source_file).name}, Page {self.page_number}")
-        return "\n".join(parts)
-
-
-@dataclass  
-class ImageExtractionConfig:
-    """Configuration for image extraction."""
-    output_dir: Path = field(default_factory=lambda: EXTRACTED_IMAGES_DIR)
-    image_format: str = "png"
-    min_width: int = 50  # Minimum width to consider as valid image
-    min_height: int = 50  # Minimum height
-    min_brightness: float = 20.0  # Minimum mean brightness (0-255) to avoid black images
-    min_std_dev: float = 10.0  # Minimum standard deviation to avoid solid color images
-    extract_tables: bool = True
-    extract_figures: bool = True
-    context_chars: int = 500  # Number of characters to extract around image
-    use_gpu: bool = False
-    
-    # Clustering config
-    cluster_merge_distance: int = 50  # Pixels to merge nearby drawings
-    min_drawing_size: int = 20  # Minimum size for a drawing path
-    min_diagram_size: int = 100  # Minimum size for a clustered diagram
-    
-    # New config for full page extraction
-    extract_full_page: bool = True  # If True, extract full page if it contains images
-
-
-class ImageExtractor:
+def check_paddle_installation() -> dict:
     """
-    Extracts image regions from documents using PaddleOCR PP-Structure.
+    Check if PaddleOCR and its dependencies are properly installed.
     
-    PP-Structure performs layout analysis to identify:
-    - Figures/Images
-    - Tables
-    - Charts
-    - Text blocks
+    Returns:
+        dict with keys:
+            - 'available': bool - True if paddle mode can be used
+            - 'packages': dict - Status of each required package
+            - 'message': str - Human-readable status message
+            - 'tips': list[str] - Installation tips if packages are missing
     """
+    result = {
+        'available': False,
+        'packages': {},
+        'message': '',
+        'tips': []
+    }
     
-    def __init__(self, config: Optional[ImageExtractionConfig] = None):
-        """
-        Initialize the ImageExtractor.
-        
-        Args:
-            config: Image extraction configuration.
-        """
-        self.config = config or ImageExtractionConfig()
-        self._structure_engine = None
-        ensure_directories()
-        self.config.output_dir.mkdir(parents=True, exist_ok=True)
+    # Check each required package
+    packages_to_check = [
+        ('paddlepaddle', 'paddle', 'pip install paddlepaddle'),
+        ('paddleocr', 'paddleocr', 'pip install paddleocr'),
+        ('opencv-python', 'cv2', 'pip install opencv-python'),
+        ('numpy', 'numpy', 'pip install numpy'),
+        ('pymupdf', 'fitz', 'pip install pymupdf'),
+    ]
     
-    @property
-    def structure_engine(self):
-        """Lazy loading of PP-Structure engine."""
-        if self._structure_engine is None:
-            self._structure_engine = self._init_structure_engine()
-        return self._structure_engine
-    
-    def _init_structure_engine(self):
-        """Initialize the PP-Structure engine."""
+    all_ok = True
+    for pkg_name, import_name, install_cmd in packages_to_check:
         try:
-            from paddleocr import PPStructureV3
+            __import__(import_name)
+            result['packages'][pkg_name] = {'installed': True, 'version': None}
             
-            print("Initializing PP-StructureV3 engine...")
-            engine = PPStructureV3(
-                use_doc_orientation_classify=False,
-                use_doc_unwarping=False,
-            )
-            print("PP-StructureV3 engine initialized successfully")
-            return engine
-        except ImportError:
-            raise ImportError(
-                "PaddleOCR is required for image extraction. "
-                "Install with: pip install paddleocr[all]"
-            )
-    
-    def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
-        """
-        Extract images from a PDF file.
-        
-        Uses PyMuPDF (fitz) as primary method, falls back to pdf2image if needed.
-        
-        Args:
-            pdf_path: Path to the PDF file.
-            
-        Returns:
-            List of ExtractedImage objects.
-        """
-        pdf_path = Path(pdf_path)
-        if not pdf_path.exists():
-            raise FileNotFoundError(f"PDF not found: {pdf_path}")
-        
-        print(f"Extracting images from: {pdf_path.name}")
-        
-        # 1. Check if we should do full page extraction
-        if self.config.extract_full_page:
-            return self._extract_pages_with_images_pymupdf(pdf_path)
-
-        # Legacy: Extract specific regions
-        # 1. Extract embedded images (bitmaps)
-        extracted_images = self._extract_pdf_with_pymupdf(pdf_path)
-        
-        # 2. Extract vector drawings (diagrams)
-        if self.config.extract_figures:
-            drawings = self._extract_drawings_with_pymupdf(pdf_path)
-            extracted_images.extend(drawings)
-        
-        print(f"  Extracted {len(extracted_images)} images/drawings from {pdf_path.name}")
-        return extracted_images
-
-    def _extract_pages_with_images_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
-        """
-        Extract full pages as images if they contain any images or drawings.
-        
-        Args:
-            pdf_path: Path to the PDF file.
-            
-        Returns:
-            List of ExtractedImage objects (one per page with images).
-        """
-        try:
-            import fitz  # PyMuPDF
-            
-            doc = fitz.open(str(pdf_path))
-            extracted_pages = []
-            
-            print(f"  Scanning {len(doc)} pages for images...")
-            
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                has_visuals = False
-                
-                # 1. Check for images
-                image_list = page.get_images(full=True)
-                if image_list:
-                    # Filter small icons/artifacts
-                    for img in image_list:
-                        xref = img[0]
-                        try:
-                            pix = fitz.Pixmap(doc, xref)
-                            if pix.width >= self.config.min_width and pix.height >= self.config.min_height:
-                                has_visuals = True
-                                pix = None
-                                break
-                            pix = None
-                        except:
-                            continue
-                
-                # 2. Check for drawings if no images found yet
-                if not has_visuals:
-                    drawings = page.get_drawings()
-                    for d in drawings:
-                        rect = d["rect"]
-                        if rect.width > 20 and rect.height > 20:
-                            has_visuals = True
-                            break
-                
-                if has_visuals:
-                    try:
-                        # Render full page
-                        # Use dpi=150 or 200 for good quality
-                        pix = page.get_pixmap(dpi=150)
-                        
-                        image_data = pix.tobytes("png")
-                        image_id = hashlib.md5(image_data).hexdigest()[:8]
-                        image_filename = f"{pdf_path.stem}_page_{page_num + 1}_{image_id}.png"
-                        image_path = self.config.output_dir / image_filename
-                        
-                        # Save image
-                        pix.save(str(image_path))
-                        pix = None
-                        
-                        # Get full page text
-                        text = page.get_text()
-                        
-                        extracted_pages.append(ExtractedImage(
-                            image_id=image_id,
-                            image_path=str(image_path),
-                            source_file=str(pdf_path),
-                            page_number=page_num + 1,
-                            bbox=(0, 0, page.rect.width, page.rect.height),
-                            region_type="full_page_image",
-                            surrounding_text=text,  # Full page text
-                            caption="",
-                            description=f"Full page image from {pdf_path.name}, page {page_num + 1}"
-                        ))
-                        
-                        print(f"    Captured Page {page_num + 1} as image (contains visuals)")
-                        
-                    except Exception as e:
-                        print(f"    Error capturing page {page_num + 1}: {e}")
-            
-            doc.close()
-            print(f"  Converted {len(extracted_pages)} pages to images from {pdf_path.name}")
-            return extracted_pages
-            
-        except ImportError:
-            print("  PyMuPDF not available")
-            return []
-        except Exception as e:
-            print(f"  Error with PyMuPDF: {e}")
-            return []
-    
-    def _extract_pdf_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
-        """Extract images using PyMuPDF (fitz) - primary method."""
-        try:
-            import fitz  # PyMuPDF
-            
-            doc = fitz.open(str(pdf_path))
-            extracted_images = []
-            
-            print(f"  Using PyMuPDF, {len(doc)} pages")
-            
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                
-                # Get images directly from PDF
-                image_list = page.get_images(full=True)
-                
-                for img_index, img in enumerate(image_list):
-                    try:
-                        xref = img[0]
-                        
-                        # Use Pixmap to handle color spaces and masks correctly
-                        pix = fitz.Pixmap(doc, xref)
-                        
-                        # Check image size
-                        if pix.width < self.config.min_width or pix.height < self.config.min_height:
-                            pix = None
-                            continue
-                            
-                        # Handle alpha channel / color space
-                        # If CMYK or grayscale with alpha, convert to RGB
-                        if pix.n - pix.alpha < 3: 
-                            new_pix = fitz.Pixmap(fitz.csRGB, pix)
-                            pix = new_pix
-                        
-                        # Store dimensions before clearing pix
-                        width = pix.width
-                        height = pix.height
-                            
-                        # Generate image ID
-                        # Validate image content (check for black/empty images)
-                        # Pass the pixmap directly to avoid PIL overhead if possible
-                        is_valid, _, _ = self._is_valid_pixmap(pix)
-                        
-                        if not is_valid:
-                            pix = None
-                            continue
-                            
-                        image_data = pix.tobytes("png")
-                        image_id = hashlib.md5(image_data).hexdigest()[:8]
-                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_img{img_index}_{image_id}.png"
-                        image_path = self.config.output_dir / image_filename
-                        
-                        # Save image
-                        pix.save(str(image_path))
-                        pix = None  # Free memory
-                        
-                        # Get surrounding text
-                        text = page.get_text()
-                        
-                        extracted_images.append(ExtractedImage(
-                            image_id=image_id,
-                            image_path=str(image_path),
-                            source_file=str(pdf_path),
-                            page_number=page_num + 1,
-                            bbox=(0, 0, width, height),
-                            region_type="figure",
-                            surrounding_text=text[:self.config.context_chars],
-                            caption="",
-                            description=f"Image from {pdf_path.name}, page {page_num + 1}"
-                        ))
-                        
-                        print(f"    Found image on page {page_num + 1}: {width}x{height}")
-                    except Exception as e:
-                        print(f"    Error extracting image {img_index} on page {page_num + 1}: {e}")
-            
-            doc.close()
-            return extracted_images
-            
-        except ImportError:
-            print("  PyMuPDF not available")
-            return []
-        except Exception as e:
-            print(f"  Error with PyMuPDF: {e}")
-            return []
-
-    def _extract_drawings_with_pymupdf(self, pdf_path: Path) -> list[ExtractedImage]:
-        """Extract vector drawings (diagrams) by rendering drawing paths."""
-        extracted_drawings = []
-        try:
-            import fitz
-            doc = fitz.open(str(pdf_path))
-            
-            print(f"  Scanning for vector drawings...")
-            
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                drawings = page.get_drawings()
-                
-                if not drawings:
-                    continue
-                    
-                # Filter small drawings and group them
-                valid_rects = []
-                for d in drawings:
-                    rect = d["rect"]
-                    # Filter out very small paths (e.g. bullets, table lines)
-                    if rect.width > 20 or rect.height > 20:
-                        valid_rects.append(rect)
-                
-                if not valid_rects:
-                    continue
-                
-                # Cluster rects to find diagram regions
-                # Optimized approach: Sort by position and single-pass merge
-                
-                # 1. Sort by Y then X
-                valid_rects.sort(key=lambda r: (r.y0, r.x0))
-                
-                clusters = []
-                if valid_rects:
-                    current_cluster = fitz.Rect(valid_rects[0])
-                    
-                    for rect in valid_rects[1:]:
-                        # Check if rect is close to current cluster
-                        # Expand current cluster by merge distance for check
-                        expanded = fitz.Rect(current_cluster)
-                        expanded.x0 -= self.config.cluster_merge_distance
-                        expanded.y0 -= self.config.cluster_merge_distance
-                        expanded.x1 += self.config.cluster_merge_distance
-                        expanded.y1 += self.config.cluster_merge_distance
-                        
-                        if rect.intersects(expanded):
-                            current_cluster.include_rect(rect)
-                        else:
-                            # Finish current cluster and start new one
-                            clusters.append(current_cluster)
-                            current_cluster = fitz.Rect(rect)
-                    
-                    # Append the last cluster
-                    clusters.append(current_cluster)
-                
-                # Process clusters
-                for i, rect in enumerate(clusters):
-                    # Check if cluster is big enough to be a diagram
-                    if rect.width < self.config.min_diagram_size or rect.height < self.config.min_diagram_size:
-                        continue
-                        
-                    # Render the region
-                    # Use higher DPI for better quality
-                    try:
-                        pix = page.get_pixmap(clip=rect, dpi=150)
-                        
-                        # Check validity using optimized check
-                        is_valid, _, _ = self._is_valid_pixmap(pix)
-                        
-                        if not is_valid:
-                            pix = None
-                            continue
-                        
-                        image_data = pix.tobytes("png")
-                        # Save
-                        image_id = hashlib.md5(image_data).hexdigest()[:8]
-                        image_filename = f"{pdf_path.stem}_p{page_num + 1}_drawing{i}_{image_id}.png"
-                        image_path = self.config.output_dir / image_filename
-                        
-                        pix.save(str(image_path))
-                        
-                        # Get text
-                        text = page.get_text(clip=rect)
-                        
-                        extracted_drawings.append(ExtractedImage(
-                            image_id=image_id,
-                            image_path=str(image_path),
-                            source_file=str(pdf_path),
-                            page_number=page_num + 1,
-                            bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                            region_type="drawing",
-                            surrounding_text=text[:self.config.context_chars],
-                            caption="",
-                            description=f"Drawing from {pdf_path.name}, page {page_num + 1}"
-                        ))
-                        pix = None
-                        
-                    except Exception as e:
-                        print(f"    Error rendering drawing on page {page_num + 1}: {e}")
-
-            doc.close()
-        except Exception as e:
-            print(f"Error extracting drawings: {e}")
-            
-        return extracted_drawings
-            
-
-    
-    def _extract_pdf_with_pdf2image(self, pdf_path: Path) -> list[ExtractedImage]:
-        """Extract images using pdf2image and PP-Structure."""
-        try:
-            from pdf2image import convert_from_path
-            
-            extracted_images = []
-            pages = convert_from_path(str(pdf_path), dpi=150)
-            
-            for page_num, page_image in enumerate(pages, start=1):
-                print(f"  Processing page {page_num}/{len(pages)}...")
-                
-                # Save page as temporary image
-                temp_path = self.config.output_dir / f"_temp_page_{page_num}.png"
-                page_image.save(str(temp_path))
-                
-                # Extract images from this page
-                page_images = self._extract_from_image(
-                    temp_path,
-                    source_file=str(pdf_path),
-                    page_number=page_num
-                )
-                extracted_images.extend(page_images)
-                
-                # Clean up temp file
-                temp_path.unlink(missing_ok=True)
-            
-            return extracted_images
-                
-        except ImportError:
-            print("  pdf2image not available. Install poppler and pdf2image.")
-            return []
-        except Exception as e:
-            print(f"  pdf2image error: {e}")
-            return []
-    
-    def _extract_from_image(
-        self,
-        image_path: Path,
-        source_file: str,
-        page_number: int = 1
-    ) -> list[ExtractedImage]:
-        """
-        Extract image regions from a single image using PP-Structure.
-        
-        Args:
-            image_path: Path to the image.
-            source_file: Original source file path.
-            page_number: Page number in the source document.
-            
-        Returns:
-            List of ExtractedImage objects.
-        """
-        extracted_images = []
-        
-        try:
-            from PIL import Image
-            import numpy as np
-            
-            # Run PP-Structure analysis
-            results = self.structure_engine.predict(input=str(image_path))
-            
-            # Load original image for cropping
-            original_image = Image.open(image_path)
-            
-            # Process results
-            for result in results:
-                # Get layout parsing result
-                if hasattr(result, 'layout_parsing_result'):
-                    layout_result = result.layout_parsing_result
-                elif isinstance(result, dict) and 'layout_parsing_result' in result:
-                    layout_result = result['layout_parsing_result']
-                else:
-                    continue
-                
-                # Extract text content for context
-                all_text = self._extract_text_from_result(result)
-                
-                # Process each detected region
-                if isinstance(layout_result, dict):
-                    boxes = layout_result.get('boxes', [])
-                    for box_idx, box in enumerate(boxes):
-                        region_type = box.get('type', 'unknown')
-                        bbox = box.get('bbox', box.get('coordinate', []))
-                        
-                        # Filter by region type
-                        if region_type in ['figure', 'image', 'chart', 'picture']:
-                            if not self.config.extract_figures:
-                                continue
-                        elif region_type == 'table':
-                            if not self.config.extract_tables:
-                                continue
-                        else:
-                            continue  # Skip text regions
-                        
-                        if len(bbox) >= 4:
-                            # Crop and save the image region
-                            cropped = self._crop_region(original_image, bbox)
-                            
-                            if cropped and self._is_valid_size(cropped):
-                                image_id = hashlib.md5(
-                                    f"{source_file}_{page_number}_{box_idx}".encode()
-                                ).hexdigest()[:8]
-                                
-                                image_filename = f"{Path(source_file).stem}_p{page_number}_{region_type}_{image_id}.{self.config.image_format}"
-                                save_path = self.config.output_dir / image_filename
-                                cropped.save(str(save_path))
-                                
-                                # Get nearby text as context
-                                nearby_text = self._get_nearby_text(box, layout_result)
-                                
-                                extracted_images.append(ExtractedImage(
-                                    image_id=image_id,
-                                    image_path=str(save_path),
-                                    source_file=source_file,
-                                    page_number=page_number,
-                                    bbox=tuple(bbox[:4]),
-                                    region_type=region_type,
-                                    surrounding_text=nearby_text or all_text[:self.config.context_chars],
-                                    caption=box.get('caption', ''),
-                                    description=f"{region_type} from page {page_number}"
-                                ))
-            
-        except Exception as e:
-            print(f"Error extracting from image: {e}")
-        
-        return extracted_images
-    
-    def _crop_region(self, image, bbox) -> Optional["Image.Image"]:
-        """Crop a region from an image."""
-        try:
-            from PIL import Image
-            
-            # Handle different bbox formats
-            if len(bbox) == 4:
-                x1, y1, x2, y2 = bbox
-            elif len(bbox) == 8:  # Polygon format
-                x1 = min(bbox[0], bbox[2], bbox[4], bbox[6])
-                y1 = min(bbox[1], bbox[3], bbox[5], bbox[7])
-                x2 = max(bbox[0], bbox[2], bbox[4], bbox[6])
-                y2 = max(bbox[1], bbox[3], bbox[5], bbox[7])
-            else:
-                return None
-            
-            # Ensure valid coordinates
-            x1, y1 = max(0, int(x1)), max(0, int(y1))
-            x2, y2 = min(image.width, int(x2)), min(image.height, int(y2))
-            
-            if x2 > x1 and y2 > y1:
-                return image.crop((x1, y1, x2, y2))
-            return None
-            
-        except Exception:
-            return None
-    
-    def _is_valid_size(self, image) -> bool:
-        """Check if image meets minimum size requirements."""
-        return image.width >= self.config.min_width and image.height >= self.config.min_height
-    
-    def _extract_text_from_result(self, result) -> str:
-        """Extract all text content from PP-Structure result."""
-        texts = []
-        
-        try:
-            if hasattr(result, 'layout_parsing_result'):
-                layout = result.layout_parsing_result
-            elif isinstance(result, dict):
-                layout = result.get('layout_parsing_result', {})
-            else:
-                return ""
-            
-            if isinstance(layout, dict):
-                boxes = layout.get('boxes', [])
-                for box in boxes:
-                    if box.get('type') in ['text', 'title', 'paragraph']:
-                        texts.append(box.get('text', ''))
-        except Exception:
-            pass
-        
-        return " ".join(texts)
-    
-    def _get_nearby_text(self, target_box: dict, layout_result: dict) -> str:
-        """Get text from regions near the target box."""
-        if not isinstance(layout_result, dict):
-            return ""
-        
-        target_bbox = target_box.get('bbox', target_box.get('coordinate', []))
-        if len(target_bbox) < 4:
-            return ""
-        
-        target_center_y = (target_bbox[1] + target_bbox[3]) / 2
-        
-        nearby_texts = []
-        boxes = layout_result.get('boxes', [])
-        
-        for box in boxes:
-            if box.get('type') in ['text', 'title', 'paragraph', 'caption']:
-                box_bbox = box.get('bbox', box.get('coordinate', []))
-                if len(box_bbox) >= 4:
-                    box_center_y = (box_bbox[1] + box_bbox[3]) / 2
-                    
-                    # Check if text is near (within 100 pixels vertically)
-                    if abs(box_center_y - target_center_y) < 200:
-                        text = box.get('text', '')
-                        if text:
-                            nearby_texts.append(text)
-        
-        return " ".join(nearby_texts[:3])  # Limit to 3 nearby text blocks
-    
-    def extract_from_file(self, file_path: Path) -> list[ExtractedImage]:
-        """
-        Extract images from a file (PDF or image).
-        
-        Args:
-            file_path: Path to the file.
-            
-        Returns:
-            List of ExtractedImage objects.
-        """
-        file_path = Path(file_path)
-        suffix = file_path.suffix.lower()
-        
-        if suffix == '.pdf':
-            return self.extract_from_pdf(file_path)
-        elif suffix in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
-            return self._extract_from_image(
-                file_path,
-                source_file=str(file_path),
-                page_number=1
-            )
-        else:
-            print(f"Unsupported file type: {suffix}")
-            return []
-    
-    def extract_from_directory(
-        self,
-        directory: Path,
-        recursive: bool = True
-    ) -> list[ExtractedImage]:
-        """
-        Extract images from all documents in a directory.
-        
-        Args:
-            directory: Path to the directory.
-            recursive: Whether to process subdirectories.
-            
-        Returns:
-            List of all ExtractedImage objects.
-        """
-        directory = Path(directory)
-        all_images = []
-        
-        pattern = '**/*' if recursive else '*'
-        extensions = ['.pdf', '.png', '.jpg', '.jpeg']
-        
-        for file_path in directory.glob(pattern):
-            if file_path.is_file() and file_path.suffix.lower() in extensions:
-                try:
-                    images = self.extract_from_file(file_path)
-                    all_images.extend(images)
-                except Exception as e:
-                    print(f"Error processing {file_path}: {e}")
-        
-        return all_images
-    
-    def _is_valid_pixmap(self, pix) -> tuple[bool, str, dict]:
-        """
-        Check if pixmap is valid using direct buffer access (faster than PIL).
-        """
-        stats = {"brightness": 0, "std_dev": 0}
-        try:
-            # Get raw samples
-            # pix.samples is a bytes object
-            # pix.n is number of channels (e.g. 3 for RGB, 4 for RGBA)
-            
-            # Convert to numpy array
-            # Note: This is a view, no copy if possible, but safe to copy for stats
-            samples = np.frombuffer(pix.samples, dtype=np.uint8)
-            
-            if pix.n >= 3:
-                # Reshape to (H, W, C)
-                # We only care about brightness, so we can just average all channels or take a stride
-                # For speed, let's just use the buffer directly.
-                # If RGB, mean of all bytes is roughly mean brightness (approximation)
-                # But to be accurate to PIL's convert('L'), we should do weighted sum.
-                # However, for "is it black?", simple mean is enough.
+            # Try to get version
+            try:
+                import importlib.metadata
+                result['packages'][pkg_name]['version'] = importlib.metadata.version(pkg_name)
+            except:
                 pass
-            
-            # Simple statistical check on the whole buffer
-            # This treats R, G, B, A equally, which is a rough approximation but fast
-            mean_val = np.mean(samples)
-            std_val = np.std(samples)
-            
-            stats["brightness"] = mean_val
-            stats["std_dev"] = std_val
-            
-            # Thresholds might need slight adjustment compared to PIL 'L' mode
-            # but usually close enough for "black vs content"
-            
-            if mean_val < self.config.min_brightness:
-                return False, f"Too dark (mean={mean_val:.2f})", stats
                 
-            if std_val < self.config.min_std_dev:
-                return False, f"Low variance (std={std_val:.2f})", stats
-                
-            return True, "OK", stats
-            
-        except Exception as e:
-            # Fallback to PIL method if something fails
-            print(f"Error in fast validation: {e}")
-            return self._is_valid_image(pix.tobytes("png"))
-
-    def _is_valid_image(self, image_data: bytes) -> tuple[bool, str, dict]:
-        """
-        Check if image is valid (not too dark, not solid color).
+        except ImportError:
+            result['packages'][pkg_name] = {'installed': False, 'version': None}
+            result['tips'].append(install_cmd)
+            all_ok = False
+    
+    result['available'] = all_ok
+    
+    if all_ok:
+        result['message'] = "PaddleOCR is available and ready to use."
         
-        Args:
-            image_data: Image data in bytes (PNG format).
-            
-        Returns:
-            Tuple (is_valid, reason, stats_dict)
-        """
-        stats = {"brightness": 0, "std_dev": 0}
+        # Additional check: try to create PPStructure
         try:
-            with Image.open(io.BytesIO(image_data)) as img:
-                # Convert to grayscale for analysis
-                gray = img.convert('L')
-                np_img = np.array(gray)
-                
-                # Calculate statistics
-                mean_brightness = np.mean(np_img)
-                std_dev = np.std(np_img)
-                
-                stats["brightness"] = mean_brightness
-                stats["std_dev"] = std_dev
-                
-                # Check brightness (avoid black images)
-                if mean_brightness < self.config.min_brightness:
-                    return False, f"Too dark (brightness={mean_brightness:.2f} < {self.config.min_brightness})", stats
-                
-                # Check variance (avoid solid color images)
-                if std_dev < self.config.min_std_dev:
-                    return False, f"Low variance (std_dev={std_dev:.2f} < {self.config.min_std_dev})", stats
-                    
-                return True, "OK", stats
+            import os
+            os.environ["FLAGS_use_mkldnn"] = "0"
+            os.environ["GLOG_minloglevel"] = "3"
+            from paddleocr import PPStructure
+            result['message'] += " PP-Structure can be initialized."
         except Exception as e:
-            return False, f"Error: {e}", stats
-
-    def get_vectorization_data(self, images: list[ExtractedImage]) -> list[dict]:
-        """
-        Prepare extracted images for vectorization.
-        
-        Args:
-            images: List of ExtractedImage objects.
-            
-        Returns:
-            List of dicts ready for vectorization.
-        """
-        data = []
-        for img in images:
-            data.append({
-                "chunk_id": f"img_{img.image_id}",
-                "content": img.get_vectorization_text(),
-                "metadata": {
-                    "type": "extracted_image",
-                    "region_type": img.region_type,
-                    "image_path": img.image_path,
-                    "source_file": img.source_file,
-                    "page_number": img.page_number,
-                    "bbox": str(img.bbox),
-                },
-                "source_file": img.source_file
-            })
-        return data
+            result['message'] += f" Warning: PP-Structure init test failed: {e}"
+            result['tips'].append("Try: pip install --upgrade paddleocr paddlepaddle")
+    else:
+        missing = [k for k, v in result['packages'].items() if not v['installed']]
+        result['message'] = f"Missing packages: {', '.join(missing)}"
+    
+    return result
 
 
-# Global extractor instance
-_extractor: Optional[ImageExtractor] = None
-
-
-def get_image_extractor() -> ImageExtractor:
-    """Get or create the global image extractor instance."""
-    global _extractor
-    if _extractor is None:
-        _extractor = ImageExtractor()
-    return _extractor
+def print_paddle_status():
+    """Print PaddleOCR installation status to console."""
+    print("=" * 60)
+    print("PaddleOCR Installation Status")
+    print("=" * 60)
+    
+    status = check_paddle_installation()
+    
+    print(f"\nStatus: {'✓ Available' if status['available'] else '✗ Not Available'}")
+    print(f"\n{status['message']}")
+    
+    print("\nPackages:")
+    for pkg, info in status['packages'].items():
+        version = info['version'] or 'unknown'
+        if info['installed']:
+            print(f"  ✓ {pkg}: {version}")
+        else:
+            print(f"  ✗ {pkg}: NOT INSTALLED")
+    
+    if status['tips']:
+        print("\nTo install missing packages:")
+        for tip in status['tips']:
+            print(f"  {tip}")
+    
+    print("\n" + "=" * 60)
+    
+    if status['available']:
+        print("You can use: python -m src.main process --mode paddle")
+    else:
+        print("Paddle mode unavailable. Use: python -m src.main process --mode pymupdf")
+    print("=" * 60)
+    
+    return status['available']
