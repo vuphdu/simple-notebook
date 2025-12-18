@@ -21,6 +21,7 @@ from src.vectorization import TextVectorizer, VectorStore, get_vectorizer, get_v
 from src.search import SearchEngine, get_search_engine
 from src.sequence_chart import SequenceChartProcessor, get_chart_processor
 from src.image_extraction import ImageExtractor, get_image_extractor
+from src.image_tag import add_tag
 
 
 def process_documents(
