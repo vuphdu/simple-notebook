@@ -168,7 +168,7 @@ faiss_index_type: str = "Flat"  # Options: Flat, IVF, HNSW
 
 ```python
 # In config/settings.py
-backend: str = "chromadb"  # Persistent, with metadata filtering
+backend: str = "faiss"  # Persistent, with metadata filtering
 ```
 
 **Benefits:**

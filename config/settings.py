@@ -6,6 +6,40 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 
+def detect_device(force_cpu: bool = False) -> str:
+    """
+    Auto-detect the best available device for model inference.
+    
+    Args:
+        force_cpu: If True, always return "cpu" regardless of GPU availability.
+    
+    Returns:
+        "cuda" if GPU is available and not forced to CPU, otherwise "cpu".
+    """
+    if force_cpu:
+        print("💻 Device: CPU (forced)")
+        return "cpu"
+    
+    try:
+        import torch
+        if torch.cuda.is_available():
+            # Log GPU info for debugging
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"🚀 Device: GPU - {gpu_name} ({gpu_memory:.1f} GB)")
+            return "cuda"
+        else:
+            print("💻 Device: CPU (no CUDA GPU detected)")
+    except ImportError:
+        print("💻 Device: CPU (torch not available for detection)")
+    
+    return "cpu"
+
+
+# Auto-detect device at module load
+DEFAULT_DEVICE = detect_device()
+
+
 # Base paths
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -25,8 +59,9 @@ class ModelConfig(BaseModel):
     model_name: str = "Alibaba-NLP/gte-multilingual-base"
     model_cache_dir: Path = MODELS_DIR
     max_seq_length: int = 8192
-    device: str = "cpu"  # or "cuda" if GPU available
+    device: str = DEFAULT_DEVICE  # Auto-detect: "cuda" if GPU available, else "cpu"
     normalize_embeddings: bool = True
+    force_cpu: bool = False  # Set to True to force CPU even if GPU is available
 
 
 class ChunkingConfig(BaseModel):
