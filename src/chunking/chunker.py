@@ -152,8 +152,39 @@ class DocumentChunker:
         """
         suffix = file_path.suffix.lower()
         
+        # Plain text files (including markdown)
         if suffix in ['.txt', '.md', '.markdown']:
             return file_path.read_text(encoding='utf-8')
+        
+        # Source code files - read as plain text with file info header
+        CODE_EXTENSIONS = [
+            '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx',  # C/C++
+            '.py', '.pyi',  # Python
+            '.java',  # Java
+            '.js', '.jsx', '.ts', '.tsx', '.mjs',  # JavaScript/TypeScript
+            '.go',  # Go
+            '.rs',  # Rust
+            '.rb',  # Ruby
+            '.php',  # PHP
+            '.swift', '.kt', '.kts',  # Swift/Kotlin
+            '.cs',  # C#
+            '.scala',  # Scala
+            '.lua',  # Lua
+            '.sh', '.bash', '.zsh', '.fish',  # Shell
+            '.sql',  # SQL
+            '.r', '.R',  # R
+            '.m', '.mm',  # Objective-C
+            '.pl', '.pm',  # Perl
+            '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',  # Config
+            '.xml', '.html', '.htm', '.css', '.scss', '.sass',  # Web
+            '.cmake', '.make', '.mk', 'Makefile',  # Build
+        ]
+        
+        if suffix in CODE_EXTENSIONS:
+            content = file_path.read_text(encoding='utf-8')
+            # Add file info header for better context
+            header = f"// File: {file_path.name}\n// Path: {file_path}\n\n"
+            return header + content
         
         elif suffix == '.pdf':
             return self._read_pdf(file_path)

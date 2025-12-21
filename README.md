@@ -117,6 +117,35 @@ python -m src.main clean -y
 python -m src.main clean --all -y
 ```
 
+### 8. Index source code (for AI assistants)
+
+Index large codebases for RAG retrieval by AI coding assistants:
+
+```bash
+# Index a code directory with auto-detected tag
+python -m src.main index-code /path/to/wpa_supplicant/
+
+# Index with custom project tag
+python -m src.main index-code /path/to/code --tag wifi_driver
+
+# Index specific file types only
+python -m src.main index-code /path/to/code --ext .c .h
+```
+
+Supported file types: C/C++, Python, Java, JavaScript/TypeScript, Go, Rust, Shell, and config files.
+
+### 9. Quick query (for AI assistants)
+
+Optimized search command for AI coding assistants with compact output:
+
+```bash
+# Quick search with compact output (no logging)
+python -m src.main query "wifi connection handling" -k 10
+
+# Output as JSON
+python -m src.main query "authentication flow" --format json
+```
+
 ## Model
 
 This system uses **Alibaba-NLP/gte-multilingual-base** for text embedding:

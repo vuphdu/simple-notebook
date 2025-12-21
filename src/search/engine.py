@@ -212,7 +212,7 @@ class SearchEngine:
         
         Args:
             results: List of SearchResult objects.
-            format_type: Output format ('text', 'json', 'markdown').
+            format_type: Output format ('text', 'json', 'markdown', 'compact').
             
         Returns:
             Formatted string.
@@ -226,6 +226,25 @@ class SearchEngine:
                 ensure_ascii=False,
                 indent=2
             )
+        
+        elif format_type == "compact":
+            # Compact format for AI assistants - minimal, easy to parse
+            lines = []
+            for r in results:
+                source = Path(r.metadata.get('source_file', 'unknown')).name
+                page = r.metadata.get('page_number', r.metadata.get('chunk_index', '?'))
+                score = f"{r.similarity:.2f}"
+                
+                # Header line
+                lines.append(f"--- [{r.rank}] {source} (p.{page}) score:{score} ---")
+                
+                # Content - clean and trimmed
+                content = r.document.strip()
+                if len(content) > 1500:
+                    content = content[:1500] + "..."
+                lines.append(content)
+                lines.append("")
+            return "\n".join(lines)
         
         elif format_type == "markdown":
             lines = ["# Search Results\n"]

@@ -124,14 +124,24 @@ def process_documents(
 def search_documents(
     query: str,
     top_k: int = 5,
-    save_results: bool = True
+    save_results: bool = True,
+    format_type: str = "text",
+    quiet: bool = False
 ):
     """
     Search through vectorized documents.
+    
+    Args:
+        query: Search query text.
+        top_k: Number of results to return.
+        save_results: Whether to save results to process directory.
+        format_type: Output format ('text', 'json', 'compact', 'markdown').
+        quiet: If True, suppress header messages (useful for AI tools).
     """
-    print(f"Searching for: '{query}'")
-    print(f"Using backend: {settings.vectordb.backend}")
-    print("-" * 50)
+    if not quiet:
+        print(f"Searching for: '{query}'")
+        print(f"Using backend: {settings.vectordb.backend}")
+        print("-" * 50)
     
     engine = get_search_engine()
     
@@ -141,7 +151,7 @@ def search_documents(
         results = engine.search(query, top_k=top_k)
     
     # Display results
-    print(engine.format_results(results, format_type="text"))
+    print(engine.format_results(results, format_type=format_type))
     
     return results
 
@@ -155,6 +165,95 @@ def show_stats():
     print("-" * 50)
     for key, value in stats.items():
         print(f"  {key}: {value}")
+
+
+def index_code(
+    input_path: Path,
+    project_tag: Optional[str] = None,
+    extensions: Optional[list[str]] = None
+):
+    """
+    Index source code files for RAG search.
+    
+    This is optimized for indexing large codebases like wpa_supplicant,
+    Linux kernel modules, etc. for AI assistant retrieval.
+    
+    Args:
+        input_path: Path to code directory or file.
+        project_tag: Tag to identify this codebase (e.g., 'wpa_supplicant', 'wifi_driver').
+        extensions: File extensions to include. Default: common code files.
+    """
+    input_path = Path(input_path)
+    project_tag = project_tag or input_path.name
+    
+    print(f"📁 Indexing code from: {input_path}")
+    print(f"🏷️  Project tag: {project_tag}")
+    print("-" * 50)
+    
+    # Default code extensions
+    if extensions is None:
+        extensions = [
+            '.c', '.h', '.cpp', '.hpp', '.cc', '.cxx',  # C/C++
+            '.py', '.pyi',  # Python
+            '.java',  # Java
+            '.js', '.jsx', '.ts', '.tsx',  # JavaScript/TypeScript
+            '.go', '.rs', '.rb', '.php',  # Other languages
+            '.sh', '.bash',  # Shell scripts
+            '.yaml', '.yml', '.json', '.toml',  # Config files
+        ]
+    
+    # Initialize components
+    chunker = DocumentChunker()
+    vectorizer = get_vectorizer()
+    vector_store = get_vector_store()
+    
+    # Find and process files
+    if input_path.is_file():
+        files = [input_path]
+    else:
+        files = []
+        for ext in extensions:
+            files.extend(input_path.rglob(f"*{ext}"))
+    
+    print(f"Found {len(files)} code files")
+    
+    all_vectorized = []
+    processed = 0
+    
+    for file_path in files:
+        try:
+            # Chunk the file
+            chunks = chunker.chunk_file(file_path)
+            
+            # Add project metadata
+            for chunk in chunks:
+                chunk.metadata["project"] = project_tag
+                chunk.metadata["type"] = "source_code"
+                chunk.metadata["language"] = file_path.suffix.lstrip('.')
+                chunk.metadata["relative_path"] = str(file_path.relative_to(input_path) if input_path.is_dir() else file_path.name)
+            
+            # Vectorize
+            vectorized = vectorizer.vectorize_chunks(chunks)
+            all_vectorized.extend(vectorized)
+            processed += 1
+            
+            if processed % 50 == 0:
+                print(f"  Processed {processed}/{len(files)} files...")
+                
+        except Exception as e:
+            print(f"  ⚠️ Error processing {file_path.name}: {e}")
+    
+    # Store in vector database
+    if all_vectorized:
+        print(f"\n💾 Storing {len(all_vectorized)} code chunks...")
+        vector_store.add_chunks(all_vectorized)
+    
+    print("\n" + "=" * 50)
+    print(f"✅ Code indexing complete!")
+    print(f"   Files processed: {processed}")
+    print(f"   Chunks created: {len(all_vectorized)}")
+    print(f"   Project tag: {project_tag}")
+    print(f"\n💡 Search with: python -m src.main query 'wifi connection handling'")
 
 
 def extract_images(
@@ -397,6 +496,61 @@ def main():
         action="store_true",
         help="Don't save search input/output"
     )
+    search_parser.add_argument(
+        "--format", "-f",
+        type=str,
+        choices=["text", "json", "compact", "markdown"],
+        default="text",
+        help="Output format (default: text). Use 'compact' for AI assistants."
+    )
+    
+    # Query command - Quick search for AI assistants (alias with sensible defaults)
+    query_parser = subparsers.add_parser(
+        "query",
+        help="Quick search for AI assistants (compact output, no logging)"
+    )
+    query_parser.add_argument(
+        "query",
+        type=str,
+        help="Search query"
+    )
+    query_parser.add_argument(
+        "--top-k", "-k",
+        type=int,
+        default=10,
+        help="Number of results (default: 10)"
+    )
+    query_parser.add_argument(
+        "--format", "-f",
+        type=str,
+        choices=["text", "json", "compact", "markdown"],
+        default="compact",
+        help="Output format (default: compact)"
+    )
+    
+    # Index-code command - Index source code for RAG
+    index_code_parser = subparsers.add_parser(
+        "index-code",
+        help="Index source code files for RAG search (for AI assistants)"
+    )
+    index_code_parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to code directory or file"
+    )
+    index_code_parser.add_argument(
+        "--tag", "-t",
+        type=str,
+        default=None,
+        help="Project tag for identification (default: directory name)"
+    )
+    index_code_parser.add_argument(
+        "--ext",
+        type=str,
+        nargs="+",
+        default=None,
+        help="File extensions to include (e.g., .c .h .py)"
+    )
     
     # Stats command
     subparsers.add_parser(
@@ -481,7 +635,25 @@ def main():
         search_documents(
             query=args.query,
             top_k=args.top_k,
-            save_results=not args.no_save
+            save_results=not args.no_save,
+            format_type=args.format
+        )
+    
+    elif args.command == "query":
+        # Quick search for AI - quiet mode, no save, compact format
+        search_documents(
+            query=args.query,
+            top_k=args.top_k,
+            save_results=False,
+            format_type=args.format,
+            quiet=True
+        )
+    
+    elif args.command == "index-code":
+        index_code(
+            input_path=args.path,
+            project_tag=args.tag,
+            extensions=args.ext
         )
     
     elif args.command == "stats":
