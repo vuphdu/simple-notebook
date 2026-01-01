@@ -358,7 +358,78 @@ python -m src.main search "error 0x8007" --hybrid
 
 ---
 
-## Future Enhancements (Phase 4)
+## Phase 4: OlmOCR Integration ✅
+
+### Overview
+
+Integrated advanced prompting techniques from [OlmOCR](https://github.com/allenai/olmocr) project for enhanced Vision Language Model (VLM) understanding and better semantic search.
+
+### Key Features
+
+**1. Anchor Text Generation**
+
+Generate OlmOCR-style positional context for extracted images:
+
+```
+Page dimensions: 612x792
+[Image 100x200 to 300x400]
+[72x720]Title of the document
+[72x680]Author name here
+[72x300]Main content text...
+```
+
+**2. Content Type Detection**
+
+Automatically classify images as:
+
+- `DIAGRAM` - Vector drawings, flowcharts, architecture diagrams
+- `TABLE` - Tabular data with grid patterns
+- `IMAGE` - Generic images/photos
+
+**3. Chunk Classification**
+
+Automatically classify text chunks:
+
+| Type      | Detection                                 |
+| --------- | ----------------------------------------- |
+| `text`    | Default prose content                     |
+| `code`    | Contains `def `, `function `, code blocks |
+| `table`   | Markdown tables with `\|` patterns        |
+| `heading` | Starts with `#`                           |
+| `list`    | Multiple list items                       |
+
+**4. Enhanced Metadata**
+
+New fields for chunks and images:
+
+- `has_equations` - Contains LaTeX (`\(`, `\[`, `$$`)
+- `has_code_blocks` - Contains code blocks or code keywords
+- `anchor_text` - Positional context for images
+- `is_diagram`, `is_table` - Content classification
+
+### Files Modified
+
+- `src/image_extraction/extractor.py` - Anchor text + content detection
+- `src/chunking/chunker.py` - Chunk type classification
+- `src/vectorization/vectorizer.py` - Enhanced metadata output
+
+### Benefits
+
+| Feature              | Before        | After                |
+| -------------------- | ------------- | -------------------- |
+| Image search         | Basic context | Rich anchor text     |
+| Content filtering    | None          | Type prefixes        |
+| Chunk classification | Generic       | Auto-detected types  |
+| VLM understanding    | Limited       | Positional grounding |
+
+### Reference
+
+- OlmOCR: [github.com/allenai/olmocr](https://github.com/allenai/olmocr)
+- Paper: "olmOCR: Unlocking Trillions of Tokens in PDFs with Vision Language Models"
+
+---
+
+## Future Enhancements (Phase 5)
 
 **Planned features:**
 
@@ -367,6 +438,7 @@ python -m src.main search "error 0x8007" --hybrid
 - Cross-references (show "See also: Figure X")
 - Section detection (link images to sections)
 - Cross-encoder re-ranking (for higher precision)
+- Search type filtering (filter by DIAGRAM, TABLE, CODE)
 
 ---
 
@@ -410,9 +482,10 @@ chunk_overlap: int = 100
 - **v0.2.0 (Phase 1)** - Enhanced search output, expanded context
 - **v0.3.0 (Phase 2)** - Optimized chunking, clean architecture
 - **v0.4.0 (Phase 3)** - Hybrid Search (Vector + BM25)
-- **v0.5.0 (Planned)** - Phase 4 grouping & cross-references
+- **v0.5.0 (Phase 4)** - OlmOCR Integration (anchor text, content classification)
+- **v0.6.0 (Planned)** - Phase 5 grouping & cross-references
 
 ---
 
-**Last Updated:** 2025-12-31  
-**System Status:** ✅ Production Ready (Phase 1 + 2 + 3 Complete)
+**Last Updated:** 2026-01-01  
+**System Status:** ✅ Production Ready (Phase 1 + 2 + 3 + 4 Complete)

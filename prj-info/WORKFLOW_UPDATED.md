@@ -1,6 +1,19 @@
-# RAG System Workflow - Phase 1 + 2 Improvements
+# RAG System Workflow - Phase 1 + 2 + 3 + 4 Improvements
 
-## 🎯 Latest Updates (2025-12-18)
+## 🎯 Latest Updates (2026-01-01)
+
+### Phase 4: OlmOCR Integration ✅ (NEW)
+
+- **Anchor text generation** - OlmOCR-style `[x×y]text` positional context
+- **Content type detection** - Auto-classify as `DIAGRAM`, `TABLE`, or `IMAGE`
+- **Chunk classification** - Detect `code`, `table`, `heading`, `list` types
+- **Enhanced metadata** - `has_equations`, `has_code_blocks` flags
+
+### Phase 3: Hybrid Search ✅
+
+- **Vector + BM25** - Combines semantic and keyword matching
+- **Configurable alpha** - 70% vector + 30% BM25 by default
+- **Better exact matches** - Error codes, technical terms
 
 ### Phase 1: Enhanced Search Output ✅
 
@@ -25,8 +38,8 @@
 
 ```
 Total: 417 items
-├── Text chunks: 332 (optimized)
-└── Images: 85 (smart crops)
+├── Text chunks: 332 (optimized, classified)
+└── Images: 85 (smart crops with anchor text)
 ```
 
 ---
@@ -48,15 +61,19 @@ Input PDF (e.g., HFP_v1.8.pdf - 139 pages)
 └─────────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────────┐
-│ STEP 2: Smart Image Extraction (Phase 1)            │
+│ STEP 2: Smart Image Extraction (Phase 1 + Phase 4)  │
 ├─────────────────────────────────────────────────────┤
 │ • Detect bitmap images (get_image_info)             │
 │ • Cluster vector drawings (get_drawings)            │
 │ • Merge nearby regions (±50px)                      │
 │ • Render crops with 150 DPI                         │
 │ • Extract context (±150px down, ±80px up)           │
+│ • Generate anchor text (Phase 4 OlmOCR)             │
+│   → [x×y]text positional format                     │
+│ • Detect content type (Phase 4)                     │
+│   → DIAGRAM, TABLE, or IMAGE                        │
 │ • Save as: filename_p{page}_crop_{number}.png       │
-│ • Output: 85 smart crops                            │
+│ • Output: 85 smart crops with rich metadata         │
 └─────────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────────┐
@@ -311,12 +328,12 @@ python -m src.main search "query" --top-k 10
 
 ## 📚 Additional Documentation
 
-- **IMPROVEMENTS.md** - Detailed Phase 1 + 2 changes
+- **IMPROVEMENTS.md** - Detailed Phase 1 + 2 + 3 + 4 changes
 - **README.md** - Quick start guide
-- **Implementation plans** - Phase 3 roadmap
+- **.clinerules/** - Cline AI assistant rules
 
 ---
 
-**Last Updated:** 2025-12-18  
-**Version:** 0.3.0 (Phase 1 + 2 Complete)  
+**Last Updated:** 2026-01-01  
+**Version:** 0.5.0 (Phase 1 + 2 + 3 + 4 Complete)  
 **Status:** ✅ Production Ready

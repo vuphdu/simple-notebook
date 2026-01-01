@@ -4,7 +4,7 @@ A lean and efficient Retrieval-Augmented Generation (RAG) system with smart imag
 
 ## Features
 
-- **Document Chunking**: Split documents into manageable chunks for processing
+- **Document Chunking**: Split documents into manageable chunks with automatic type classification
 - **Vectorization**: Convert text chunks to vectors using Alibaba-NLP/gte-multilingual-base model
 - **Hybrid Search**: Combine semantic vector search with BM25 keyword matching for better results
 - **Sequence Chart Processing**: Extract and process sequence diagrams with image export and description vectorization
@@ -12,6 +12,7 @@ A lean and efficient Retrieval-Augmented Generation (RAG) system with smart imag
 - **Dual Backend Support**: Choose between FAISS (fast, default) or ChromaDB (full-featured)
 - **Smart Image Extraction**: Extract images and vector drawings from PDFs using PyMuPDF intelligent clustering
 - **Context Updates**: Manually add context/notes to specific documents or images to improve searchability
+- **OlmOCR Integration**: Advanced prompting with anchor text and content classification for better VLM understanding
 
 ## Directory Structure
 
@@ -167,23 +168,96 @@ This system uses **Alibaba-NLP/gte-multilingual-base** for text embedding:
 
 ## Smart Image Extraction
 
-The system uses **PyMuPDF** for intelligent image extraction:
+The system uses **PyMuPDF** for intelligent image extraction with **OlmOCR-style enhancements**:
 
 ### Features
 
 - **Fast & Lightweight**: Direct PDF parsing with no external dependencies
 - **Smart Cropping**: Automatically detects and extracts figures, diagrams, and vector drawings
 - **Vector Drawing Clustering**: Groups nearby vector paths into coherent diagrams
-- **Context Extraction**: Captures surrounding text for better searchability
+- **OlmOCR Anchor Text**: Generates positional context with coordinates for VLM understanding
+- **Content Type Detection**: Automatically classifies images as `DIAGRAM`, `TABLE`, or `IMAGE`
 - **Embedded Images**: Extracts all bitmap images from PDFs
+
+### OlmOCR Anchor Text Format
+
+Extracted images include anchor text with positional information:
+
+```
+Page dimensions: 612x792
+[Image 100x200 to 300x400]
+[72x720]Title of the document
+[72x680]Author name
+[72x300]Main content text...
+```
+
+This format helps Vision Language Models (VLMs) understand document layout better.
 
 ### How It Works
 
 1. **Detects embedded images**: Finds all bitmap images in the PDF
 2. **Clusters vector drawings**: Groups nearby vector paths (lines, shapes) into diagrams
 3. **Merges nearby regions**: Combines overlapping or adjacent elements
-4. **Extracts context**: Captures surrounding text as metadata
-5. **Saves as PNG**: All extracted regions saved in `extracted_images/`
+4. **Generates anchor text**: Creates OlmOCR-style positional context
+5. **Classifies content**: Detects tables, diagrams, or generic images
+6. **Saves as PNG**: All extracted regions saved in `extracted_images/`
+
+## OlmOCR Integration
+
+This system integrates prompting techniques from [OlmOCR](https://github.com/allenai/olmocr) project for enhanced Vision Language Model (VLM) understanding.
+
+### Key Features
+
+| Feature                    | Description                                |
+| -------------------------- | ------------------------------------------ |
+| **Anchor Text**            | Positional context with `[x×y]text` format |
+| **Content Classification** | Auto-detect `DIAGRAM`, `TABLE`, or `IMAGE` |
+| **Rich Vectorization**     | Type prefixes for better search filtering  |
+
+### How It Helps
+
+- **Better Search**: Type prefixes (`[DIAGRAM]`, `[TABLE]`) enable filtering
+- **VLM Understanding**: Anchor text provides layout context for image description
+- **Semantic Grounding**: Position info helps AI understand document structure
+
+### Reference
+
+Based on best practices from:
+
+- OlmOCR: [github.com/allenai/olmocr](https://github.com/allenai/olmocr)
+- Paper: "olmOCR: Unlocking Trillions of Tokens in PDFs with Vision Language Models"
+
+## Chunk Classification
+
+Documents are automatically classified during chunking:
+
+### Chunk Types
+
+| Type      | Detection                                 |
+| --------- | ----------------------------------------- |
+| `text`    | Default for prose content                 |
+| `code`    | Contains `def `, `function `, code blocks |
+| `table`   | Markdown tables with `\|` patterns        |
+| `heading` | Starts with `#`                           |
+| `list`    | Multiple list items (`-`, `*`, `1.`)      |
+
+### Additional Metadata
+
+- `has_equations`: Contains LaTeX (`\(`, `\[`, `$$`)
+- `has_code_blocks`: Contains ` ``` ` or code keywords
+
+### Example Output
+
+```python
+{
+    "chunk_id": "doc.pdf_0",
+    "content": "# Introduction\n\nThis document...",
+    "chunk_type": "heading",
+    "has_equations": False,
+    "has_code_blocks": False,
+    "metadata": {...}
+}
+```
 
 ## Vector Store Backends
 
