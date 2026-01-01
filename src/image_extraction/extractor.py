@@ -26,11 +26,16 @@ class ExtractedImage:
     image_path: str
     source_file: str
     page_number: int
-    bbox: tuple  # (x1, y1, x2, y2)
+    bbox: tuple  # (x0, y0, x1, y1)
     region_type: str  # "smart_crop"
     surrounding_text: str = ""
     caption: str = ""
     description: str = ""
+    # OlmOCR-style fields
+    anchor_text: str = ""           # Positional text context with coordinates
+    is_table: bool = False          # Majority content is tabular
+    is_diagram: bool = False        # Majority content is diagram/figure
+    page_dimensions: tuple = (0, 0) # (width, height) of the page
     
     def to_dict(self) -> dict:
         return {
@@ -43,19 +48,52 @@ class ExtractedImage:
             "surrounding_text": self.surrounding_text,
             "caption": self.caption,
             "description": self.description,
+            "anchor_text": self.anchor_text,
+            "is_table": self.is_table,
+            "is_diagram": self.is_diagram,
+            "page_dimensions": self.page_dimensions,
         }
     
     def get_vectorization_text(self) -> str:
-        """Generate text for vectorization."""
+        """
+        Generate rich text for vectorization with OlmOCR-style context.
+        
+        Format optimized for semantic search with:
+        - Type prefix for filtering
+        - Position information
+        - Classification metadata
+        - Rich contextual text
+        """
         parts = []
+        
+        # Type prefix for easy identification and filtering
+        content_type = "DIAGRAM" if self.is_diagram else "TABLE" if self.is_table else "IMAGE"
+        parts.append(f"[{content_type}] {Path(self.source_file).name} - Page {self.page_number}")
+        
+        # Position information (OlmOCR style)
+        if self.page_dimensions != (0, 0):
+            parts.append(f"Page: {self.page_dimensions[0]:.0f}x{self.page_dimensions[1]:.0f}")
+        parts.append(f"Position: ({self.bbox[0]:.0f}, {self.bbox[1]:.0f}) to ({self.bbox[2]:.0f}, {self.bbox[3]:.0f})")
+        
+        # Caption is highest priority (if available)
         if self.caption:
             parts.append(f"Caption: {self.caption}")
-        if self.description:
+        
+        # Description
+        default_desc = f"Smart crop from {Path(self.source_file).name}, page {self.page_number}"
+        if self.description and self.description != default_desc:
             parts.append(f"Description: {self.description}")
-        if self.surrounding_text:
-            parts.append(f"Context: {self.surrounding_text}")
-        parts.append(f"Type: {self.region_type}")
-        parts.append(f"Source: {Path(self.source_file).name}, Page {self.page_number}")
+        
+        # Anchor text with positions (OlmOCR-style rich context)
+        if self.anchor_text:
+            # Truncate if too long but keep structure
+            anchor = self.anchor_text[:1500] if len(self.anchor_text) > 1500 else self.anchor_text
+            parts.append(f"Layout:\n{anchor}")
+        elif self.surrounding_text:
+            # Fallback to surrounding text
+            context = self.surrounding_text[:800] if len(self.surrounding_text) > 800 else self.surrounding_text
+            parts.append(f"Context: {context}")
+        
         return "\n".join(parts)
 
 
@@ -124,9 +162,118 @@ class ImageExtractor:
         print(f"Extracting images from: {pdf_path.name}")
         return self._extract_smart_crops(pdf_path)
 
+    def _get_anchor_text(self, page, image_rect: fitz.Rect, max_length: int = 2000) -> str:
+        """
+        Generate OlmOCR-style anchor text with positional information.
+        
+        This provides structural hints to help VLMs understand document layout.
+        Format: [x_coord x y_coord]text_content
+        
+        Args:
+            page: PyMuPDF page object
+            image_rect: Bounding box of the image region
+            max_length: Maximum length of anchor text
+            
+        Returns:
+            Anchor text string with positional information
+        """
+        page_width = page.rect.width
+        page_height = page.rect.height
+        
+        result = f"Page dimensions: {page_width:.0f}x{page_height:.0f}\n"
+        result += f"[Image {image_rect.x0:.0f}x{image_rect.y0:.0f} to {image_rect.x1:.0f}x{image_rect.y1:.0f}]\n"
+        
+        # Get text blocks with positions
+        try:
+            blocks = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)["blocks"]
+        except Exception:
+            return result
+        
+        text_elements = []
+        for block in blocks:
+            if block.get("type") == 0:  # Text block
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        if text and len(text) > 2:  # Skip very short text
+                            bbox = span.get("bbox", [0, 0, 0, 0])
+                            x, y = bbox[0], bbox[1]
+                            text_elements.append((x, y, text))
+        
+        # Sort by position (top to bottom, left to right in PDF coords)
+        # Note: PDF y-axis is bottom-up, but get_text returns top-down
+        text_elements.sort(key=lambda t: (t[1], t[0]))
+        
+        # Build anchor text with coordinates
+        current_length = len(result)
+        for x, y, text in text_elements:
+            line = f"[{x:.0f}x{y:.0f}]{text}\n"
+            if current_length + len(line) > max_length:
+                break
+            result += line
+            current_length += len(line)
+        
+        return result
+    
+    def _detect_content_type(self, page, rect: fitz.Rect) -> dict:
+        """
+        Detect if the region contains primarily table or diagram content.
+        
+        Args:
+            page: PyMuPDF page object
+            rect: Region bounding box
+            
+        Returns:
+            dict with is_table and is_diagram flags
+        """
+        result = {"is_table": False, "is_diagram": False}
+        
+        try:
+            # Get text in the region
+            text = page.get_text(clip=rect)
+            
+            # Table detection heuristics
+            # Tables often have: multiple "|" chars, aligned columns, grid patterns
+            lines = text.split('\n')
+            pipe_count = text.count('|')
+            tab_count = text.count('\t')
+            
+            # Check for table-like patterns
+            if pipe_count > 5 or tab_count > 10:
+                result["is_table"] = True
+            
+            # Check for aligned numeric columns (common in tables)
+            numeric_lines = sum(1 for line in lines if any(c.isdigit() for c in line))
+            if len(lines) > 3 and numeric_lines / max(len(lines), 1) > 0.5:
+                result["is_table"] = True
+            
+            # Diagram detection heuristics
+            # Diagrams have: many vector drawings, less text, specific keywords
+            drawings = page.get_drawings()
+            drawings_in_rect = [d for d in drawings if fitz.Rect(d["rect"]).intersects(rect)]
+            
+            text_length = len(text.strip())
+            drawing_count = len(drawings_in_rect)
+            
+            # High drawing density with low text = likely diagram
+            if drawing_count > 10 and text_length < 500:
+                result["is_diagram"] = True
+            
+            # Check for diagram keywords in surrounding text
+            diagram_keywords = ["figure", "fig.", "diagram", "chart", "flow", "schema", "architecture"]
+            text_lower = text.lower()
+            if any(kw in text_lower for kw in diagram_keywords):
+                result["is_diagram"] = True
+                
+        except Exception:
+            pass
+        
+        return result
+
     def _extract_smart_crops(self, pdf_path: Path) -> list[ExtractedImage]:
         """
         Smartly detect and crop figures/diagrams from PDF pages using PyMuPDF.
+        Enhanced with OlmOCR-style anchor text and content classification.
         """
         try:
             doc = fitz.open(str(pdf_path))
@@ -137,6 +284,7 @@ class ImageExtractor:
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 page_images = []
+                page_dims = (page.rect.width, page.rect.height)
                 
                 # A. Get Bitmaps (Images)
                 img_infos = page.get_image_info(xrefs=True)
@@ -152,7 +300,7 @@ class ImageExtractor:
                 # C. Merge Overlapping/Nearby Regions
                 merged_regions = self._merge_nearby_blocks(page_images)
                 
-                # D. Render and Save
+                # D. Render and Save with OlmOCR enhancements
                 for i, rect in enumerate(merged_regions):
                     try:
                         # Render region
@@ -171,13 +319,19 @@ class ImageExtractor:
                         
                         pix.save(str(image_path))
                         
-                        # Get context text (caption/surrounding) - EXPANDED WINDOW (Phase 1)
+                        # Get context text (caption/surrounding) - EXPANDED WINDOW
                         context_rect = fitz.Rect(rect)
-                        context_rect.y1 += 150  # Look 150px below for caption (was 50)
-                        context_rect.y0 -= 80   # Look 80px above for title (was 20)
+                        context_rect.y1 += 150  # Look 150px below for caption
+                        context_rect.y0 -= 80   # Look 80px above for title
                         context_rect.x0 -= 20   # Expand horizontally for full text
                         context_rect.x1 += 20
-                        text = page.get_text(clip=context_rect)
+                        surrounding_text = page.get_text(clip=context_rect)
+                        
+                        # OlmOCR Enhancement: Get anchor text with positions
+                        anchor_text = self._get_anchor_text(page, rect)
+                        
+                        # OlmOCR Enhancement: Detect content type
+                        content_type = self._detect_content_type(page, rect)
                         
                         extracted_images.append(ExtractedImage(
                             image_id=image_id,
@@ -186,9 +340,14 @@ class ImageExtractor:
                             page_number=page_num + 1,
                             bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
                             region_type="smart_crop",
-                            surrounding_text=text,
+                            surrounding_text=surrounding_text,
                             caption="",
-                            description=f"Smart crop from {pdf_path.name}, page {page_num + 1}"
+                            description=f"Smart crop from {pdf_path.name}, page {page_num + 1}",
+                            # OlmOCR fields
+                            anchor_text=anchor_text,
+                            is_table=content_type["is_table"],
+                            is_diagram=content_type["is_diagram"],
+                            page_dimensions=page_dims,
                         ))
                     except Exception as e:
                         print(f"    Error saving crop {i} on page {page_num + 1}: {e}")

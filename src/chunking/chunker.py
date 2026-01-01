@@ -26,6 +26,10 @@ class DocumentChunk(BaseModel):
     start_index: int
     end_index: int
     source_file: Optional[str] = None
+    # OlmOCR-style classification fields
+    chunk_type: str = "text"       # text, code, table, heading, list
+    has_equations: bool = False    # Contains LaTeX or math expressions
+    has_code_blocks: bool = False  # Contains code blocks or code-like content
 
 
 class DocumentChunker:
@@ -58,6 +62,63 @@ class DocumentChunker:
             is_separator_regex=False,
         )
     
+    def _detect_chunk_type(self, content: str) -> dict:
+        """
+        Detect chunk type and characteristics for OlmOCR-style classification.
+        
+        Args:
+            content: The chunk content to analyze.
+            
+        Returns:
+            dict with chunk_type, has_equations, has_code_blocks
+        """
+        result = {
+            "chunk_type": "text",
+            "has_equations": False,
+            "has_code_blocks": False,
+        }
+        
+        content_stripped = content.strip()
+        
+        # Detect LaTeX equations
+        latex_markers = [r"\(", r"\)", r"\[", r"\]", "$$", r"\begin{", r"\end{"]
+        if any(marker in content for marker in latex_markers):
+            result["has_equations"] = True
+        
+        # Detect code blocks (markdown style)
+        if "```" in content:
+            result["has_code_blocks"] = True
+            result["chunk_type"] = "code"
+        
+        # Detect code-like content (function definitions, etc.)
+        code_patterns = [
+            "def ", "function ", "class ", "import ", "#include",
+            "public ", "private ", "void ", "int ", "return ",
+            "if (", "for (", "while (", "=>", "->",
+        ]
+        if any(pattern in content for pattern in code_patterns):
+            result["has_code_blocks"] = True
+            if result["chunk_type"] == "text":
+                result["chunk_type"] = "code"
+        
+        # Detect tables (markdown or ascii)
+        lines = content.split('\n')
+        pipe_lines = sum(1 for line in lines if '|' in line and line.count('|') >= 2)
+        if pipe_lines >= 2:
+            result["chunk_type"] = "table"
+        
+        # Detect headings (markdown style)
+        if content_stripped.startswith('#'):
+            result["chunk_type"] = "heading"
+        
+        # Detect lists
+        list_markers = ['- ', '* ', '+ ', '1. ', '2. ', '3. ']
+        list_lines = sum(1 for line in lines if any(line.strip().startswith(m) for m in list_markers))
+        if list_lines >= 3 and list_lines / max(len(lines), 1) > 0.5:
+            result["chunk_type"] = "list"
+        
+        return result
+    
     def chunk_text(
         self,
         text: str,
@@ -65,7 +126,7 @@ class DocumentChunker:
         metadata: Optional[dict] = None
     ) -> list[DocumentChunk]:
         """
-        Split text into chunks.
+        Split text into chunks with OlmOCR-style classification.
         
         Args:
             text: The text content to chunk.
@@ -73,7 +134,7 @@ class DocumentChunker:
             metadata: Additional metadata to attach to chunks.
             
         Returns:
-            List of DocumentChunk objects.
+            List of DocumentChunk objects with type classification.
         """
         if not text.strip():
             return []
@@ -91,9 +152,15 @@ class DocumentChunker:
                 start_idx = current_index
             end_idx = start_idx + len(chunk_content)
             
+            # Detect chunk type (OlmOCR enhancement)
+            chunk_classification = self._detect_chunk_type(chunk_content)
+            
             chunk_metadata = {
                 "chunk_index": i,
                 "total_chunks": len(chunks),
+                "chunk_type": chunk_classification["chunk_type"],
+                "has_equations": chunk_classification["has_equations"],
+                "has_code_blocks": chunk_classification["has_code_blocks"],
                 **(metadata or {})
             }
             
@@ -103,7 +170,11 @@ class DocumentChunker:
                 metadata=chunk_metadata,
                 start_index=start_idx,
                 end_index=end_idx,
-                source_file=source_file
+                source_file=source_file,
+                # OlmOCR fields
+                chunk_type=chunk_classification["chunk_type"],
+                has_equations=chunk_classification["has_equations"],
+                has_code_blocks=chunk_classification["has_code_blocks"],
             )
             result.append(chunk)
             current_index = start_idx + 1

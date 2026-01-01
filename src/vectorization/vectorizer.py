@@ -118,14 +118,14 @@ class TextVectorizer:
         batch_size: int = 32
     ) -> list[dict]:
         """
-        Vectorize document chunks.
+        Vectorize document chunks with OlmOCR-style metadata.
         
         Args:
             chunks: List of DocumentChunk objects.
             batch_size: Batch size for processing.
             
         Returns:
-            List of dicts with chunk info and embeddings.
+            List of dicts with chunk info, embeddings, and classification.
         """
         if not chunks:
             return []
@@ -137,15 +137,32 @@ class TextVectorizer:
         print(f"Vectorizing {len(texts)} chunks...")
         embeddings = self.vectorize(texts, batch_size=batch_size)
         
-        # Combine chunks with embeddings
+        # Combine chunks with embeddings and OlmOCR metadata
         results = []
         for chunk, embedding in zip(chunks, embeddings):
+            # Get OlmOCR classification fields if available
+            chunk_type = getattr(chunk, 'chunk_type', 'text')
+            has_equations = getattr(chunk, 'has_equations', False)
+            has_code_blocks = getattr(chunk, 'has_code_blocks', False)
+            
+            # Merge classification into metadata
+            enhanced_metadata = {
+                **chunk.metadata,
+                "chunk_type": chunk_type,
+                "has_equations": has_equations,
+                "has_code_blocks": has_code_blocks,
+            }
+            
             results.append({
                 "chunk_id": chunk.chunk_id,
                 "content": chunk.content,
-                "metadata": chunk.metadata,
+                "metadata": enhanced_metadata,
                 "source_file": chunk.source_file,
-                "embedding": embedding.tolist()
+                "embedding": embedding.tolist(),
+                # Top-level classification for easy access
+                "chunk_type": chunk_type,
+                "has_equations": has_equations,
+                "has_code_blocks": has_code_blocks,
             })
         
         return results
