@@ -288,7 +288,77 @@ python -m src.main process
 
 ---
 
-## Future Enhancements (Phase 3)
+## Phase 3: Hybrid Search ✅
+
+### Overview
+
+Implemented **Hybrid Search** combining Vector Search (semantic) with BM25 (keyword matching) for significantly improved retrieval quality.
+
+### How It Works
+
+```
+Query: "WiFi authentication timeout"
+                    │
+    ┌───────────────┴───────────────┐
+    ▼                               ▼
+┌─────────────┐               ┌─────────────┐
+│ Vector      │               │ BM25        │
+│ (Semantic)  │               │ (Keywords)  │
+│ Score: 0.72 │               │ Score: 0.85 │
+└─────┬───────┘               └─────┬───────┘
+      │                             │
+      └─────────────┬───────────────┘
+                    ▼
+            ┌───────────────┐
+            │ Hybrid Score  │
+            │ = 0.7 × 0.72  │
+            │ + 0.3 × 0.85  │
+            │ = 0.759       │
+            └───────────────┘
+```
+
+### Benefits
+
+| Feature                | Vector Only | Hybrid |
+| ---------------------- | ----------- | ------ |
+| Semantic understanding | ✅          | ✅     |
+| Exact keyword match    | ❌          | ✅     |
+| Technical terms        | Weak        | Strong |
+| Error codes, IDs       | Miss        | Match  |
+
+### New Files
+
+- `src/search/bm25_search.py` - BM25 index with Vietnamese stopwords
+- Updated `src/search/engine.py` - `_hybrid_rerank()` method
+- Updated `config/settings.py` - Hybrid search config
+
+### Configuration
+
+```python
+# config/settings.py
+class SearchConfig(BaseModel):
+    use_hybrid: bool = True       # Enable by default
+    hybrid_alpha: float = 0.7     # 70% vector + 30% BM25
+    bm25_k1: float = 1.5          # Term frequency saturation
+    bm25_b: float = 0.75          # Length normalization
+```
+
+### CLI Usage
+
+```bash
+# Hybrid search (default)
+python -m src.main search "WiFi timeout error"
+
+# Pure vector search
+python -m src.main search "authentication flow" --no-hybrid
+
+# Force hybrid
+python -m src.main search "error 0x8007" --hybrid
+```
+
+---
+
+## Future Enhancements (Phase 4)
 
 **Planned features:**
 
@@ -296,11 +366,7 @@ python -m src.main process
 - Deduplication (remove similar results)
 - Cross-references (show "See also: Figure X")
 - Section detection (link images to sections)
-
-**Implementation guide available in:**
-
-- `C:\Users\VuPC\.gemini\...\implementation_plan.md`
-- `C:\Users\VuPC\.gemini\...\walkthrough.md`
+- Cross-encoder re-ranking (for higher precision)
 
 ---
 
@@ -343,9 +409,10 @@ chunk_overlap: int = 100
 - **v0.1.0** - Initial release
 - **v0.2.0 (Phase 1)** - Enhanced search output, expanded context
 - **v0.3.0 (Phase 2)** - Optimized chunking, clean architecture
-- **v0.4.0 (Planned)** - Phase 3 grouping & cross-references
+- **v0.4.0 (Phase 3)** - Hybrid Search (Vector + BM25)
+- **v0.5.0 (Planned)** - Phase 4 grouping & cross-references
 
 ---
 
-**Last Updated:** 2025-12-18  
-**System Status:** ✅ Production Ready (Phase 1 + 2 Complete)
+**Last Updated:** 2025-12-31  
+**System Status:** ✅ Production Ready (Phase 1 + 2 + 3 Complete)

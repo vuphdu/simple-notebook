@@ -88,6 +88,12 @@ class SearchConfig(BaseModel):
     top_k: int = 5
     score_threshold: float = 0.5
     include_metadata: bool = True
+    
+    # Hybrid search settings
+    use_hybrid: bool = True  # Enable hybrid search by default
+    hybrid_alpha: float = 0.7  # Weight for vector search (0.7 vector + 0.3 BM25)
+    bm25_k1: float = 1.5  # BM25 term frequency saturation
+    bm25_b: float = 0.75  # BM25 document length normalization
 
 
 class SequenceChartConfig(BaseModel):

@@ -1,6 +1,6 @@
 # 📋 Báo Cáo Chi Tiết Cấu Hình Dự Án Simple RAG System
 
-> **Ngày tạo:** 2025-12-22  
+> **Ngày cập nhật:** 2025-12-31  
 > **Mục đích:** Tài liệu tham khảo nhanh các cấu hình quan trọng trong dự án
 
 ---
@@ -73,11 +73,37 @@ simple-notebook/
 
 ### 4. SearchConfig - Cấu hình Tìm kiếm
 
-| Tham số            | Giá trị mặc định | Mô tả                            |
-| ------------------ | ---------------- | -------------------------------- |
-| `top_k`            | `5`              | Số kết quả trả về                |
-| `score_threshold`  | `0.5`            | Ngưỡng điểm similarity tối thiểu |
-| `include_metadata` | `True`           | Bao gồm metadata trong kết quả   |
+| Tham số            | Giá trị mặc định | Mô tả                              |
+| ------------------ | ---------------- | ---------------------------------- |
+| `top_k`            | `5`              | Số kết quả trả về                  |
+| `score_threshold`  | `0.5`            | Ngưỡng điểm similarity tối thiểu   |
+| `include_metadata` | `True`           | Bao gồm metadata trong kết quả     |
+| `use_hybrid`       | **`True`**       | Bật Hybrid Search (vector + BM25)  |
+| `hybrid_alpha`     | `0.7`            | Trọng số: 70% vector + 30% BM25    |
+| `bm25_k1`          | `1.5`            | BM25 term frequency saturation     |
+| `bm25_b`           | `0.75`           | BM25 document length normalization |
+
+#### Hybrid Search - Giải thích:
+
+**Hybrid Search** kết hợp 2 phương pháp tìm kiếm:
+
+- **Vector Search (Semantic)**: Tìm nội dung tương tự về ý nghĩa
+- **BM25 (Keyword)**: Tìm theo từ khóa chính xác
+
+**Công thức tính điểm:**
+
+```
+hybrid_score = alpha × vector_score + (1 - alpha) × bm25_score
+```
+
+**Tuning `hybrid_alpha`:**
+
+| Giá trị | Hành vi       | Phù hợp cho                        |
+| ------- | ------------- | ---------------------------------- |
+| `1.0`   | Pure semantic | Query về khái niệm                 |
+| `0.7`   | **Mặc định**  | Sử dụng chung                      |
+| `0.5`   | Cân bằng      | Đa mục đích                        |
+| `0.3`   | Keyword-heavy | Technical docs có thuật ngữ cụ thể |
 
 ### 5. SequenceChartConfig - Cấu hình Sequence Chart
 
@@ -113,8 +139,17 @@ python -m src.main init
 # Xử lý tài liệu (extract + chunking + vectorize)
 python -m src.main process --input data/documents
 
-# Tìm kiếm
+# Tìm kiếm (Hybrid Search mặc định)
 python -m src.main search "từ khóa" --top-k 10
+
+# Tìm kiếm chỉ dùng vector (tắt BM25)
+python -m src.main search "từ khóa" --no-hybrid
+
+# Bật Hybrid Search (nếu cấu hình tắt mặc định)
+python -m src.main search "error code 0x8007" --hybrid
+
+# Quick query cho AI assistants (compact output)
+python -m src.main query "wifi timeout" -k 10
 
 # Trích xuất ảnh từ PDF
 python -m src.main extract-images --input data/documents
@@ -147,6 +182,7 @@ python -m src.main clean --all -y
 | **Model Embedding**  | `Alibaba-NLP/gte-multilingual-base` (768 dimensions, 70+ ngôn ngữ) |
 | **Device**           | **Auto-detect** - Tự động chọn GPU nếu có                          |
 | **Vector Backend**   | **FAISS** (mặc định, nhanh) hoặc ChromaDB                          |
+| **Hybrid Search**    | **Enabled** - Vector (70%) + BM25 (30%)                            |
 | **Image Extraction** | **PyMuPDF** - smart cropping, clustering vector drawings           |
 | **Chunk Size**       | 1024 ký tự, overlap 100                                            |
 | **Top-K Search**     | 5 kết quả, threshold 0.5                                           |

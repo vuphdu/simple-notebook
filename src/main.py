@@ -5,6 +5,7 @@ This module provides the main CLI interface for the RAG system.
 """
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -70,46 +71,55 @@ def process_documents(
         vectorized_chunks = vectorizer.vectorize_chunks(chunks)
         all_vectorized.extend(vectorized_chunks)
     
-    # 2. Process PDFs (Extract Images)
+    # 2. Process PDFs (Extract Images) - Collect first, batch vectorize later
     print("\n[2a] Extracting images from PDFs...")
     extractor = get_image_extractor()
     pdf_files = list(input_dir.glob("**/*.pdf"))
     print(f"Found {len(pdf_files)} PDF files")
     
+    # Collect all image data first (extraction only, no vectorization yet)
+    all_image_data = []
     for pdf_file in pdf_files:
         try:
             extracted_pages = extractor.extract_from_file(pdf_file)
             if extracted_pages:
                 page_data = extractor.get_vectorization_data(extracted_pages)
-                
-                # Vectorize page descriptions
-                for data in page_data:
-                    embedding = vectorizer.vectorize(data["content"])[0].tolist()
-                    data["embedding"] = embedding
-                
-                all_vectorized.extend(page_data)
-                print(f"  Processed {len(extracted_pages)} pages from {pdf_file.name}")
+                all_image_data.extend(page_data)
+                print(f"  Extracted {len(extracted_pages)} images from {pdf_file.name}")
         except Exception as e:
             print(f"  Error processing PDF {pdf_file}: {e}")
+    
+    # Batch vectorize all image descriptions (single GPU call)
+    if all_image_data:
+        print(f"\n[2a] Vectorizing {len(all_image_data)} image descriptions (batch)...")
+        image_contents = [d["content"] for d in all_image_data]
+        image_embeddings = vectorizer.vectorize(image_contents)
+        for data, emb in zip(all_image_data, image_embeddings):
+            data["embedding"] = emb.tolist()
+        all_vectorized.extend(all_image_data)
 
-    # 3. Process sequence charts (if any MD files)
+    # 3. Process sequence charts (if any MD files) - Collect first, batch vectorize later
     if include_charts:
         print("\n[2b] Processing sequence charts...")
+        all_chart_data = []
         for md_file in input_dir.glob("**/*.md"):
             try:
                 charts = chart_processor.process_file(md_file, export_images=True)
                 if charts:
                     chart_data = chart_processor.get_vectorization_data(charts)
-                    
-                    # Vectorize chart descriptions
-                    for data in chart_data:
-                        embedding = vectorizer.vectorize(data["content"])[0].tolist()
-                        data["embedding"] = embedding
-                    
-                    all_vectorized.extend(chart_data)
-                    print(f"  Added {len(charts)} charts from {md_file.name}")
+                    all_chart_data.extend(chart_data)
+                    print(f"  Found {len(charts)} charts from {md_file.name}")
             except Exception as e:
                 print(f"  Error processing {md_file}: {e}")
+        
+        # Batch vectorize all chart descriptions (single GPU call)
+        if all_chart_data:
+            print(f"\n[2b] Vectorizing {len(all_chart_data)} chart descriptions (batch)...")
+            chart_contents = [d["content"] for d in all_chart_data]
+            chart_embeddings = vectorizer.vectorize(chart_contents)
+            for data, emb in zip(all_chart_data, chart_embeddings):
+                data["embedding"] = emb.tolist()
+            all_vectorized.extend(all_chart_data)
     
     # 4. Store in vector database
     if all_vectorized:
@@ -126,7 +136,8 @@ def search_documents(
     top_k: int = 5,
     save_results: bool = True,
     format_type: str = "text",
-    quiet: bool = False
+    quiet: bool = False,
+    use_hybrid: bool = None
 ):
     """
     Search through vectorized documents.
@@ -137,18 +148,21 @@ def search_documents(
         save_results: Whether to save results to process directory.
         format_type: Output format ('text', 'json', 'compact', 'markdown').
         quiet: If True, suppress header messages (useful for AI tools).
+        use_hybrid: Enable/disable hybrid search. None = use config default.
     """
     if not quiet:
         print(f"Searching for: '{query}'")
         print(f"Using backend: {settings.vectordb.backend}")
+        hybrid_status = "enabled" if (use_hybrid if use_hybrid is not None else settings.search.use_hybrid) else "disabled"
+        print(f"Hybrid search: {hybrid_status} (alpha={settings.search.hybrid_alpha})")
         print("-" * 50)
     
     engine = get_search_engine()
     
     if save_results:
-        results = engine.search_and_save(query, top_k=top_k)
+        results = engine.search_and_save(query, top_k=top_k, use_hybrid=use_hybrid)
     else:
-        results = engine.search(query, top_k=top_k)
+        results = engine.search(query, top_k=top_k, use_hybrid=use_hybrid)
     
     # Display results
     print(engine.format_results(results, format_type=format_type))
@@ -503,6 +517,17 @@ def main():
         default="text",
         help="Output format (default: text). Use 'compact' for AI assistants."
     )
+    search_parser.add_argument(
+        "--hybrid",
+        action="store_true",
+        default=None,
+        help="Enable hybrid search (vector + BM25 keyword matching)"
+    )
+    search_parser.add_argument(
+        "--no-hybrid",
+        action="store_true",
+        help="Disable hybrid search, use pure vector similarity"
+    )
     
     # Query command - Quick search for AI assistants (alias with sensible defaults)
     query_parser = subparsers.add_parser(
@@ -526,6 +551,17 @@ def main():
         choices=["text", "json", "compact", "markdown"],
         default="compact",
         help="Output format (default: compact)"
+    )
+    query_parser.add_argument(
+        "--hybrid",
+        action="store_true",
+        default=None,
+        help="Enable hybrid search (vector + BM25)"
+    )
+    query_parser.add_argument(
+        "--no-hybrid",
+        action="store_true",
+        help="Disable hybrid search"
     )
     
     # Index-code command - Index source code for RAG
@@ -625,6 +661,10 @@ def main():
     # Ensure directories exist
     ensure_directories()
     
+    # Start timing
+    start_time = time.time()
+    command_name = args.command or "help"
+    
     if args.command == "process":
         process_documents(
             input_dir=args.input,
@@ -632,21 +672,37 @@ def main():
         )
     
     elif args.command == "search":
+        # Determine hybrid mode: --hybrid overrides, --no-hybrid disables, else use config
+        use_hybrid = None
+        if getattr(args, 'hybrid', False):
+            use_hybrid = True
+        elif getattr(args, 'no_hybrid', False):
+            use_hybrid = False
+        
         search_documents(
             query=args.query,
             top_k=args.top_k,
             save_results=not args.no_save,
-            format_type=args.format
+            format_type=args.format,
+            use_hybrid=use_hybrid
         )
     
     elif args.command == "query":
+        # Determine hybrid mode
+        use_hybrid = None
+        if getattr(args, 'hybrid', False):
+            use_hybrid = True
+        elif getattr(args, 'no_hybrid', False):
+            use_hybrid = False
+        
         # Quick search for AI - quiet mode, no save, compact format
         search_documents(
             query=args.query,
             top_k=args.top_k,
             save_results=False,
             format_type=args.format,
-            quiet=True
+            quiet=True,
+            use_hybrid=use_hybrid
         )
     
     elif args.command == "index-code":
@@ -689,6 +745,16 @@ def main():
     
     else:
         parser.print_help()
+    
+    # Show elapsed time for all commands (except help)
+    if args.command:
+        elapsed = time.time() - start_time
+        if elapsed >= 60:
+            minutes = int(elapsed // 60)
+            seconds = elapsed % 60
+            print(f"\n⏱️  Completed in {minutes}m {seconds:.1f}s")
+        else:
+            print(f"\n⏱️  Completed in {elapsed:.2f}s")
 
 
 if __name__ == "__main__":

@@ -86,41 +86,153 @@ class SearchEngine:
         query: str,
         top_k: Optional[int] = None,
         threshold: Optional[float] = None,
-        filter_metadata: Optional[dict] = None
+        filter_metadata: Optional[dict] = None,
+        use_hybrid: Optional[bool] = None
     ) -> list[SearchResult]:
         """
-        Perform semantic search.
+        Perform semantic search with optional hybrid mode.
+        
+        Hybrid search combines:
+        - Vector search (semantic similarity)
+        - BM25 search (keyword matching)
+        
+        Final score = alpha * vector_score + (1 - alpha) * normalized_bm25_score
         
         Args:
             query: The search query text.
             top_k: Number of top results to return.
             threshold: Minimum similarity threshold.
             filter_metadata: Optional metadata filters.
+            use_hybrid: Override config's use_hybrid setting.
             
         Returns:
             List of SearchResult objects ordered by relevance.
         """
         top_k = top_k or self.config.top_k
         threshold = threshold if threshold is not None else self.config.score_threshold
+        use_hybrid = use_hybrid if use_hybrid is not None else self.config.use_hybrid
         
         # Vectorize the query
         query_embedding = self.vectorizer.vectorize(query)[0].tolist()
         
+        # Get more candidates for re-ranking if using hybrid
+        fetch_k = top_k * 3 if use_hybrid else top_k
+        
         # Search in vector store
         raw_results = self.vector_store.search_similar(
             query_embedding=query_embedding,
-            top_k=top_k,
-            threshold=threshold
+            top_k=fetch_k,
+            threshold=0.0  # Get all candidates, filter later
         )
         
-        # Convert to SearchResult objects
+        if not raw_results:
+            return []
+        
+        # If hybrid mode, combine with BM25
+        if use_hybrid and len(raw_results) > 0:
+            results = self._hybrid_rerank(query, raw_results, top_k, threshold)
+        else:
+            # Pure vector search - apply threshold and limit
+            results = []
+            for r in raw_results[:top_k]:
+                if r["similarity"] < threshold:
+                    continue
+                result = SearchResult(
+                    rank=len(results) + 1,
+                    document=r["document"],
+                    similarity=r["similarity"],
+                    metadata=r["metadata"],
+                    chunk_id=r["id"]
+                )
+                results.append(result)
+        
+        return results
+    
+    def _hybrid_rerank(
+        self,
+        query: str,
+        vector_results: list[dict],
+        top_k: int,
+        threshold: float
+    ) -> list[SearchResult]:
+        """
+        Re-rank results using hybrid scoring (vector + BM25).
+        
+        Args:
+            query: Original query text.
+            vector_results: Results from vector search.
+            top_k: Number of results to return.
+            threshold: Minimum score threshold.
+            
+        Returns:
+            Re-ranked SearchResult list.
+        """
+        from .bm25_search import BM25Index
+        
+        alpha = self.config.hybrid_alpha
+        
+        # Build temporary BM25 index from candidate documents
+        bm25 = BM25Index(k1=self.config.bm25_k1, b=self.config.bm25_b)
+        
+        # Prepare documents for BM25
+        docs_for_bm25 = []
+        for r in vector_results:
+            docs_for_bm25.append({
+                "chunk_id": r["id"],
+                "content": r["document"],
+                "metadata": r["metadata"]
+            })
+        
+        bm25.add_documents(docs_for_bm25)
+        
+        # Get BM25 scores
+        bm25_results = bm25.search(query, top_k=len(vector_results))
+        
+        # Create lookup for BM25 scores
+        bm25_scores = {r["id"]: r["score"] for r in bm25_results}
+        
+        # Normalize BM25 scores to [0, 1]
+        if bm25_scores:
+            max_bm25 = max(bm25_scores.values()) if bm25_scores.values() else 1.0
+            if max_bm25 > 0:
+                bm25_scores = {k: v / max_bm25 for k, v in bm25_scores.items()}
+        
+        # Combine scores
+        combined_results = []
+        for r in vector_results:
+            doc_id = r["id"]
+            vector_score = r["similarity"]
+            bm25_score = bm25_scores.get(doc_id, 0.0)
+            
+            # Hybrid score: weighted combination
+            hybrid_score = alpha * vector_score + (1 - alpha) * bm25_score
+            
+            if hybrid_score >= threshold:
+                combined_results.append({
+                    "id": doc_id,
+                    "document": r["document"],
+                    "metadata": r["metadata"],
+                    "vector_score": vector_score,
+                    "bm25_score": bm25_score,
+                    "hybrid_score": hybrid_score
+                })
+        
+        # Sort by hybrid score
+        combined_results.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        
+        # Convert to SearchResult
         results = []
-        for r in raw_results:
+        for i, r in enumerate(combined_results[:top_k]):
             result = SearchResult(
-                rank=r["rank"],
+                rank=i + 1,
                 document=r["document"],
-                similarity=r["similarity"],
-                metadata=r["metadata"],
+                similarity=r["hybrid_score"],  # Use hybrid score as similarity
+                metadata={
+                    **r["metadata"],
+                    "_vector_score": round(r["vector_score"], 4),
+                    "_bm25_score": round(r["bm25_score"], 4),
+                    "_hybrid_mode": True
+                },
                 chunk_id=r["id"]
             )
             results.append(result)

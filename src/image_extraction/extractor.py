@@ -7,7 +7,6 @@ Extracts figures, diagrams, and embedded images using intelligent clustering.
 from typing import Optional
 from pathlib import Path
 from dataclasses import dataclass, field
-import hashlib
 import sys
 
 # Add project root to path
@@ -164,9 +163,10 @@ class ImageExtractor:
                             continue
                             
                         image_data = pix.tobytes("png")
-                        image_id = hashlib.md5(image_data).hexdigest()[:8]
                         # Format: filename_p{page}_crop_{number}.png
                         image_filename = f"{pdf_path.stem}_p{page_num + 1}_crop_{i + 1}.png"
+                        # Use filename (without extension) as ID for clarity
+                        image_id = Path(image_filename).stem  # e.g., "HFP_v1.8_p14_crop_1"
                         image_path = self.config.output_dir / image_filename
                         
                         pix.save(str(image_path))

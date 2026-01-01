@@ -6,6 +6,7 @@ A lean and efficient Retrieval-Augmented Generation (RAG) system with smart imag
 
 - **Document Chunking**: Split documents into manageable chunks for processing
 - **Vectorization**: Convert text chunks to vectors using Alibaba-NLP/gte-multilingual-base model
+- **Hybrid Search**: Combine semantic vector search with BM25 keyword matching for better results
 - **Sequence Chart Processing**: Extract and process sequence diagrams with image export and description vectorization
 - **Semantic Search**: Search through vectorized documents with similarity matching
 - **Dual Backend Support**: Choose between FAISS (fast, default) or ChromaDB (full-featured)
@@ -72,8 +73,17 @@ This will:
 ### 3. Search
 
 ```bash
+# Default: Hybrid search (vector + BM25 keyword matching)
 python -m src.main search "authentication flow"
+
+# Pure vector search (semantic only, disable BM25)
+python -m src.main search "authentication flow" --no-hybrid
+
+# Explicitly enable hybrid search
+python -m src.main search "WiFi timeout error" --hybrid
 ```
+
+**Hybrid Search** combines semantic vector similarity with BM25 keyword matching for better results, especially when exact terms matter.
 
 Input/output will be saved in `/process/input/` and `/process/output/`.
 
@@ -206,14 +216,80 @@ backend: str = "faiss"  # Persistent, with metadata filtering
 - Built-in persistence
 - Easy to inspect and debug
 
+## Hybrid Search
+
+The system uses **Hybrid Search** by default, combining two approaches for better results:
+
+### How It Works
+
+```
+Query: "WiFi authentication timeout"
+                    │
+    ┌───────────────┴───────────────┐
+    ▼                               ▼
+┌─────────────┐               ┌─────────────┐
+│ Vector      │               │ BM25        │
+│ Search      │               │ Search      │
+│ (Semantic)  │               │ (Keywords)  │
+└─────┬───────┘               └─────┬───────┘
+      │                             │
+      └─────────────┬───────────────┘
+                    ▼
+            ┌───────────────┐
+            │ Hybrid Score  │
+            │ = α × vector  │
+            │ + (1-α) × bm25│
+            └───────────────┘
+```
+
+- **Vector Search**: Finds semantically similar content (e.g., "wireless auth" matches "WiFi authentication")
+- **BM25 Search**: Finds exact keyword matches (e.g., "timeout" → documents containing "timeout")
+- **Combined**: Results ranked by weighted combination of both scores
+
+### Configuration
+
+```python
+# In config/settings.py
+class SearchConfig(BaseModel):
+    use_hybrid: bool = True       # Enable hybrid search
+    hybrid_alpha: float = 0.7     # 70% vector + 30% BM25
+    bm25_k1: float = 1.5          # BM25 term frequency saturation
+    bm25_b: float = 0.75          # BM25 length normalization
+```
+
+### Tuning `hybrid_alpha`
+
+| Value | Behavior                     | Best For                           |
+| ----- | ---------------------------- | ---------------------------------- |
+| `1.0` | Pure semantic search         | Conceptual queries                 |
+| `0.7` | **Default** - semantic-heavy | General use                        |
+| `0.5` | Equal weight                 | Balanced                           |
+| `0.3` | Keyword-heavy                | Technical docs with specific terms |
+
+### CLI Usage
+
+```bash
+# Hybrid search (default)
+python -m src.main search "WiFi timeout error"
+
+# Disable hybrid (pure vector)
+python -m src.main search "authentication flow" --no-hybrid
+
+# Force hybrid on
+python -m src.main search "error code 0x8007" --hybrid
+```
+
 ## CLI Commands
 
 ```bash
 # Process documents
 python -m src.main process [--input DIR] [--no-charts]
 
-# Search
-python -m src.main search "query" [--top-k K] [--no-save]
+# Search (hybrid by default)
+python -m src.main search "query" [--top-k K] [--no-save] [--hybrid|--no-hybrid]
+
+# Quick query for AI (compact output)
+python -m src.main query "query" [--top-k K] [--hybrid|--no-hybrid]
 
 # Extract images
 python -m src.main extract-images [--input PATH] [--no-vectorize]
