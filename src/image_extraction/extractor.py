@@ -112,23 +112,29 @@ class ImageExtractionConfig:
 
 class ImageExtractor:
     """
-    Extracts image regions from PDF documents using PyMuPDF smart cropping.
+    Extracts image regions from PDF documents.
+    
+    Supports two modes:
+    - pymu: PyMuPDF smart cropping (detects and crops diagrams/figures)
+    - fullpage: Full-page rendering at 150% zoom when images detected
     
     Features:
     - Detects embedded bitmap images
-    - Clusters vector drawings into diagrams
-    - Merges nearby elements
+    - Clusters vector drawings into diagrams (pymu mode)
+    - Merges nearby elements (pymu mode)
     - Captures surrounding text as context
     """
     
-    def __init__(self, config: Optional[ImageExtractionConfig] = None):
+    def __init__(self, config: Optional[ImageExtractionConfig] = None, mode: str = "pymu"):
         """
-        Initialize the ImageExtractor with PyMuPDF smart cropping.
+        Initialize the ImageExtractor.
         
         Args:
             config: Image extraction configuration.
+            mode: Extraction mode - "pymu" for smart cropping or "fullpage" for page rendering
         """
         self.config = config or ImageExtractionConfig()
+        self.mode = mode
         ensure_directories()
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -136,14 +142,12 @@ class ImageExtractor:
             print("Warning: PyMuPDF (fitz) is not installed. Image extraction will not work.")
             print("Install with: pip install pymupdf")
 
-    def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
+    def extract_from_file(self, pdf_path: Path) -> list[ExtractedImage]:
         """
-        Extract images from a PDF file using smart cropping.
+        Extract images from a PDF file based on configured mode.
         
-        Detects and extracts:
-        - Embedded bitmap images
-        - Vector drawings and diagrams
-        - Figures and charts
+        - pymu mode: Smart cropping of diagrams/figures  
+        - fullpage mode: Full-page rendering at 150% zoom
         
         Args:
             pdf_path: Path to the PDF file.
@@ -154,13 +158,22 @@ class ImageExtractor:
         if fitz is None:
             print("  PyMuPDF not available. Install with: pip install pymupdf")
             return []
-
+        
         pdf_path = Path(pdf_path)
         if not pdf_path.exists():
             raise FileNotFoundError(f"PDF not found: {pdf_path}")
-            
-        print(f"Extracting images from: {pdf_path.name}")
-        return self._extract_smart_crops(pdf_path)
+        
+        # Route to appropriate extraction method
+        if self.mode == "fullpage":
+            return self._extract_full_pages(pdf_path)
+        else:  # Default to pymu mode
+            return self._extract_smart_crops(pdf_path)
+    
+    # Alias for backwards compatibility
+    def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
+        """Alias for extract_from_file()."""
+        return self.extract_from_file(pdf_path)
+
 
     def _get_anchor_text(self, page, image_rect: fitz.Rect, max_length: int = 2000) -> str:
         """
@@ -407,6 +420,66 @@ class ImageExtractor:
                 
         return final_clusters
 
+    def _extract_full_pages(self, pdf_path: Path) -> list[ExtractedImage]:
+        """
+        Extract full-page renders for pages containing images.
+        
+        Renders pages at 150% zoom (DPI=225) when images are detected.
+        
+        Args:
+            pdf_path: Path to the PDF file
+            
+        Returns:
+            List of ExtractedImage objects for full-page renders
+        """
+        if fitz is None:
+            return []
+        
+        extracted = []
+        
+        try:
+            doc = fitz.open(pdf_path)
+            
+            for page_num, page in enumerate(doc):
+                # Check if page has images
+                images = page.get_images()
+                if not images:
+                    continue
+                
+                # Render at 150% zoom (DPI=225 from 150 DPI)
+                mat = fitz.Matrix(1.5, 1.5)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                
+                # Save full page
+                image_id = f"{pdf_path.stem}_p{page_num+1}_fullpage"
+                image_path = self.config.output_dir / f"{image_id}.png"
+                pix.save(str(image_path))
+                
+                # Get all page text as context
+                page_text = page.get_text()
+                
+                # Get page dimensions
+                page_dims = (page.rect.width, page.rect.height)
+                
+                extracted.append(ExtractedImage(
+                    image_id=image_id,
+                    image_path=str(image_path),
+                    source_file=str(pdf_path),
+                    page_number=page_num + 1,
+                    bbox=(0, 0, page.rect.width, page.rect.height),
+                    region_type="fullpage",
+                    surrounding_text=page_text[:2000],  # Limit context length
+                    description=f"Full page from {pdf_path.name}, page {page_num+1} (150% zoom)",
+                    page_dimensions=page_dims
+                ))
+                
+            doc.close()
+            
+        except Exception as e:
+            print(f"Error extracting full pages from {pdf_path}: {e}")
+        
+        return extracted
+
     def _merge_nearby_blocks(self, rects: list[fitz.Rect]) -> list[fitz.Rect]:
         """Merge overlapping or nearby bounding boxes."""
         if not rects:
@@ -503,11 +576,24 @@ class ImageExtractor:
 
 # Global extractor instance
 _extractor: Optional[ImageExtractor] = None
+_current_mode: Optional[str] = None
 
 
-def get_image_extractor() -> ImageExtractor:
-    """Get or create the global image extractor instance."""
-    global _extractor
-    if _extractor is None:
-        _extractor = ImageExtractor()
+def get_image_extractor(mode: str = "pymu") -> ImageExtractor:
+    """
+    Get or create the global image extractor instance.
+    
+    Args:
+        mode: Extraction mode - "pymu" or "fullpage"
+        
+    Returns:
+        ImageExtractor instance configured for the specified mode
+    """
+    global _extractor, _current_mode
+    
+    # Recreate if mode changed or first time
+    if _extractor is None or _current_mode != mode:
+        _extractor = ImageExtractor(mode=mode)
+        _current_mode = mode
+    
     return _extractor

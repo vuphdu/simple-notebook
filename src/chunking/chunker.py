@@ -271,18 +271,118 @@ class DocumentChunker:
                 raise ValueError(f"Unsupported file type: {suffix}")
     
     def _read_pdf(self, file_path: Path) -> str:
-        """Read PDF file content."""
+        """
+        Read PDF file content using PyMuPDF.
+        
+        PyMuPDF better preserves line breaks and text formatting
+        compared to PyPDF2, which often concatenates lines incorrectly.
+        """
         try:
-            from PyPDF2 import PdfReader
-            reader = PdfReader(str(file_path))
+            import fitz  # PyMuPDF
+            doc = fitz.open(str(file_path))
             text_parts = []
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
+            
+            for page_num, page in enumerate(doc):
+                # Extract text with layout preservation
+                text = page.get_text()
+                if text.strip():
                     text_parts.append(text)
-            return "\n\n".join(text_parts)
+            
+            doc.close()
+            raw_text = "\n\n".join(text_parts)
+            
+            # Clean up PDF text artifacts (word wrapping, hyphenation)
+            return self._cleanup_pdf_text(raw_text)
+            
         except ImportError:
-            raise ImportError("PyPDF2 is required for PDF processing")
+            # Fallback to PyPDF2 if fitz not available
+            try:
+                from PyPDF2 import PdfReader
+                reader = PdfReader(str(file_path))
+                text_parts = []
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_parts.append(text)
+                raw_text = "\n\n".join(text_parts)
+                return self._cleanup_pdf_text(raw_text)
+            except ImportError:
+                raise ImportError("PyMuPDF (fitz) or PyPDF2 is required for PDF processing. Install with: pip install pymupdf")
+    
+    def _cleanup_pdf_text(self, text: str) -> str:
+        """
+        Clean up PDF text extraction artifacts.
+        
+        Fixes:
+        - Word wrapping (joins lines that are part of same sentence)
+        - Hyphenation (removes hyphens at line breaks)
+        - Multiple spaces/newlines
+        
+        Preserves:
+        - Real paragraph breaks (empty lines, lines ending with punctuation)
+        - Bullet points and lists
+        - Intentional formatting
+        """
+        import re
+        
+        lines = text.split('\n')
+        cleaned_lines = []
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].rstrip()
+            
+            # Empty line - preserve as paragraph break
+            if not line:
+                cleaned_lines.append('')
+                i += 1
+                continue
+            
+            # Check if we should join with next line
+            if i < len(lines) - 1:
+                next_line = lines[i + 1].lstrip()
+                
+                # Conditions to JOIN lines (same sentence):
+                # 1. Current line ends with hyphen -> remove hyphen and join
+                # 2. Current line doesn't end with sentence terminators
+                #    AND next line starts with lowercase (continuation)
+                
+                should_join = False
+                join_with_space = True  # Default: join with space
+                
+                if line.endswith('-'):
+                    # Hyphenated word wrap - remove hyphen and join WITHOUT space
+                    line = line[:-1]  # Remove hyphen
+                    should_join = True
+                    join_with_space = False  # No space for hyphenated words
+                elif next_line and not line[-1] in '.!?:;':
+                    # Line doesn't end with punctuation
+                    # Check if next line is continuation (starts with lowercase or number)
+                    if next_line[0].islower() or next_line[0].isdigit():
+                        should_join = True
+                
+                if should_join and next_line:
+                    # Join with or without space
+                    if join_with_space:
+                        line = line + ' ' + next_line
+                    else:
+                        line = line + next_line
+                    i += 2  # Skip next line since we joined it
+                    cleaned_lines.append(line)
+                    continue
+            
+            cleaned_lines.append(line)
+            i += 1
+        
+        # Join cleaned lines
+        result = '\n'.join(cleaned_lines)
+        
+        # Clean up excessive whitespace
+        result = re.sub(r' +', ' ', result)  # Multiple spaces -> single space
+        result = re.sub(r'\n{3,}', '\n\n', result)  # More than 2 newlines -> 2
+        
+        return result.strip()
+
     
     def _read_docx(self, file_path: Path) -> str:
         """Read DOCX file content."""

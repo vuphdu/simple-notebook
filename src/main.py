@@ -27,7 +27,8 @@ from src.image_tag import add_tag
 
 def process_documents(
     input_dir: Optional[Path] = None,
-    include_charts: bool = True
+    include_charts: bool = True,
+    extraction_mode: str = "pymu"
 ):
     """
     Process all documents in the input directory.
@@ -36,6 +37,11 @@ def process_documents(
     - Extracts and processes sequence charts
     - Vectorizes content
     - Stores in vector database
+    
+    Args:
+        input_dir: Input directory path
+        include_charts: Whether to process sequence charts
+        extraction_mode: Image extraction mode - "pymu" or "fullpage"
     """
     input_dir = input_dir or DOCUMENTS_DIR
     input_dir = Path(input_dir)
@@ -72,8 +78,8 @@ def process_documents(
         all_vectorized.extend(vectorized_chunks)
     
     # 2. Process PDFs (Extract Images) - Collect first, batch vectorize later
-    print("\n[2a] Extracting images from PDFs...")
-    extractor = get_image_extractor()
+    print(f"\n[2a] Extracting images from PDFs (mode: {extraction_mode})...")
+    extractor = get_image_extractor(mode=extraction_mode)
     pdf_files = list(input_dir.glob("**/*.pdf"))
     print(f"Found {len(pdf_files)} PDF files")
     
@@ -489,6 +495,19 @@ def main():
         help="Skip sequence chart processing"
     )
     
+    # Image extraction mode - mutually exclusive
+    extract_group = process_parser.add_mutually_exclusive_group()
+    extract_group.add_argument(
+        "--pymu", "-pymu",
+        action="store_true",
+        help="Use PyMuPDF smart cropping for images (default)"
+    )
+    extract_group.add_argument(
+        "--fp", "-fp",
+        action="store_true",
+        help="Full-page rendering at 150%% zoom when images detected"
+    )
+    
     # Search command
     search_parser = subparsers.add_parser(
         "search",
@@ -666,9 +685,16 @@ def main():
     command_name = args.command or "help"
     
     if args.command == "process":
+        # Determine extraction mode from flags
+        if args.fp:
+            extraction_mode = "fullpage"
+        else:  # default or --pymu explicitly set
+            extraction_mode = "pymu"
+        
         process_documents(
             input_dir=args.input,
-            include_charts=not args.no_charts
+            include_charts=not args.no_charts,
+            extraction_mode=extraction_mode
         )
     
     elif args.command == "search":
