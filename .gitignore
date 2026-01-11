@@ -37,12 +37,7 @@ data/faiss_index/*
 !data/faiss_index/.gitkeep
 
 # Documents and generated content
-data/documents/input-doc/*
-!data/documents/input-doc/.gitkeep
-data/documents/extracted_images/*
-!data/documents/extracted_images/.gitkeep
-data/documents/charts/*
-!data/documents/charts/.gitkeep
+data/documents/*
 
 # Process directories
 process/input/*
@@ -57,3 +52,5 @@ htmlcov/
 
 # Logs
 *.log
+
+

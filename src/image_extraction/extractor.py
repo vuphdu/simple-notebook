@@ -167,12 +167,27 @@ class ImageExtractor:
         if self.mode == "fullpage":
             return self._extract_full_pages(pdf_path)
         else:  # Default to pymu mode
-            return self._extract_smart_crops(pdf_path)
+            return self.extract_from_pdf(pdf_path)
     
-    # Alias for backwards compatibility
+    # Backwards compatibility alias - DO NOT call extract_from_file from here!
     def extract_from_pdf(self, pdf_path: Path) -> list[ExtractedImage]:
-        """Alias for extract_from_file()."""
-        return self.extract_from_file(pdf_path)
+        """
+        Extract images using PyMuPDF smart cropping.
+        
+        This is the original smart cropping implementation.
+        For mode-based routing, use extract_from_file() instead.
+        """
+        if fitz is None:
+            print("  PyMuPDF not available. Install with: pip install pymupdf")
+            return []
+        
+        pdf_path = Path(pdf_path)
+        if not pdf_path.exists():
+            raise FileNotFoundError(f"PDF not found: {pdf_path}")
+        
+        print(f"Extracting images from: {pdf_path.name}")
+        # Call the actual smart cropping implementation
+        return self._extract_smart_crops(pdf_path)
 
 
     def _get_anchor_text(self, page, image_rect: fitz.Rect, max_length: int = 2000) -> str:
@@ -438,7 +453,7 @@ class ImageExtractor:
         extracted = []
         
         try:
-            doc = fitz.open(pdf_path)
+            doc = fitz.open(str(pdf_path))
             
             for page_num, page in enumerate(doc):
                 # Check if page has images
